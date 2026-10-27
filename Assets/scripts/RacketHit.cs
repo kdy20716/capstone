@@ -2,36 +2,23 @@ using UnityEngine;
 
 public class RacketHit : MonoBehaviour
 {
-    private PlayerController pcPlayer;
     private VRPlayerController vrPlayer;
     private float lastHitTime = 0f;
 
     void Start()
     {
-        pcPlayer = Object.FindFirstObjectByType<PlayerController>();
         vrPlayer = Object.FindFirstObjectByType<VRPlayerController>();
     }
 
     private void TryHit(GameObject ballObj)
     {
-        if (Time.time - lastHitTime < 0.3f) return;
-        lastHitTime = Time.time;
+        if (Time.unscaledTime - lastHitTime < 0.25f) return;
+        lastHitTime = Time.unscaledTime;
 
-        if (GameManager.Instance != null && GameManager.Instance.isVRMode)
+        if (vrPlayer == null) vrPlayer = Object.FindFirstObjectByType<VRPlayerController>();
+        if (vrPlayer != null)
         {
-            if (vrPlayer == null) vrPlayer = Object.FindFirstObjectByType<VRPlayerController>();
-            if (vrPlayer != null)
-            {
-                vrPlayer.OnRacketHit();
-            }
-        }
-        else
-        {
-            if (pcPlayer == null) pcPlayer = Object.FindFirstObjectByType<PlayerController>();
-            if (pcPlayer != null)
-            {
-                pcPlayer.PerformHit();
-            }
+            vrPlayer.OnRacketHit();
         }
     }
 

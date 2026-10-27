@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.InputSystem;
+using UnityEngine.XR.Interaction.Toolkit.Inputs.Haptics;
 using System.Collections;
 
 public class VRPlayerController : MonoBehaviour
@@ -10,70 +11,55 @@ public class VRPlayerController : MonoBehaviour
     public float slideDuration = 0.4f;
     public Transform characterModel;
     public BoxCollider moveArea;
-    public Transform rigTransform; // 이동시킬 XR Origin 루트 (null이면 자동 탐색)
+    public Transform rigTransform;
 
     [Header("Hit Settings")]
-    public BoxCollider opponentCourtArea;  
-    public Transform racketCenter; // 라켓(채)의 중심점
-    public float hitRange = 2.0f; // 타격 가능 거리
-    public float minFlightTime = 1.0f; 
-    public float maxFlightTime = 1.6f; 
-    [Range(0, 100)] public float powerShotChance = 10f;
+    public BoxCollider opponentCourtArea;
+    public Transform racketCenter;
+    public float hitRange = 2.4f;
+    public float minFlightTime = 1.0f;
+    public float maxFlightTime = 1.6f;
+    [Range(0, 100)] public float powerShotChance = 15f;
+    public float swingVelocityThreshold = 1.1f;
 
     [Header("Racket Selection")]
-    public GameObject[] rackets; // 사용할 라켓 오브젝트들 (4개)
-    
-    public void SelectRacket(int index)
-    {
-        if (rackets == null || rackets.Length == 0) return;
-        if (index < 0 || index >= rackets.Length) return;
-
-        for (int i = 0; i < rackets.Length; i++)
-        {
-            if (rackets[i] != null)
-            {
-                rackets[i].SetActive(i == index);
-                if (i == index)
-                {
-                    Transform childCenter = rackets[i].transform.Find("Center");
-                    racketCenter = (childCenter != null) ? childCenter : rackets[i].transform;
-                }
-            }
-        }
-    }
+    public GameObject[] rackets;
 
     [Header("Net Settings")]
-    public Transform netPoint; 
-    public float netClearance = 0.5f; 
+    public Transform netPoint;
+    public float netClearance = 0.5f;
 
     [Header("Serve Settings")]
-    public Transform servePoint; 
-    public float tossForce = 5f; 
-    public Transform vrLeftHand; 
-    public float vrTossThreshold = 0.5f; 
+    public Transform servePoint;
+    public float tossForce = 5f;
+    public Transform vrLeftHand;
+    public Transform vrRightHand;
+    public float vrTossThreshold = 0.45f;
 
     [Header("Animation")]
     public Animator animator;
-    public float hitDelay = 0.1f; // VR은 즉시 타격에 가깝게 짧은 딜레이
+    public float hitDelay = 0.08f;
     public bool IsSwinging { get; private set; }
 
     [Header("VR Input Actions")]
-    public InputActionProperty moveAction;  // 조이스틱 이동
-    public InputActionProperty slideAction; // 슬라이딩 버튼
-    public InputActionProperty tossAction;  // 서브 토스 버튼 (옵션)
+    public InputActionProperty moveAction;
+    public InputActionProperty slideAction;
+    public InputActionProperty tossAction;
 
     private Ball currentBall;
     private bool isSliding = false;
-    private bool isServing = false; 
-    private bool isBallTossed = false; 
-    private Vector3 lastHandPos;
-    private Vector3 startPosition;
-    private float currentRallySpeedMultiplier = 1.0f; 
+    private bool isServing = false;
+    private bool isBallTossed = false;
+    private Vector3 lastLeftHandPos;
+    private Vector3 lastRightHandPos;
+    private Vector3 startPosition = new Vector3(-0.06f, 0f, -1.499f);
+    private Quaternion startRotation = Quaternion.Euler(0f, 180f, 0f);
+    private float currentRallySpeedMultiplier = 1.0f;
     private float lastPhysicalHitTime = 0f;
+    private float baseMoveSpeed = 5f;
 
     void Start()
     {
-        // 1. XR Origin 루트 탐색
         if (rigTransform == null)
         {
             if (transform.parent != null && (transform.parent.name.Contains("XR Origin") || transform.parent.name.Contains("Rig")))
@@ -84,38 +70,125 @@ public class VRPlayerController : MonoBehaviour
                 rigTransform = transform;
         }
 
-        startPosition = rigTransform != null ? rigTransform.position : transform.position;
+        startPosition = new Vector3(-0.06f, 0f, -1.499f);
+        startRotation = Quaternion.Euler(0f, 180f, 0f);
+        baseMoveSpeed = moveSpeed;
         FindBall();
-        
-        SetupInputActions();
+        SetupControllersAndActions();
 
-        if (vrLeftHand != null) lastHandPos = vrLeftHand.position;
+        if (vrLeftHand != null) lastLeftHandPos = vrLeftHand.position;
+        if (vrRightHand != null) lastRightHandPos = vrRightHand.position;
 
-        // 게임 매니저에 저장된 라켓 인덱스 적용
         if (GameManager.Instance != null)
         {
             SelectRacket(GameManager.Instance.selectedRacketIndex);
+            ApplyCharacterPreset(GameManager.Instance.selectedCharacterIndex);
         }
     }
 
-    void SetupInputActions()
+    void LateUpdate()
     {
-        // 1. Move Action: 바인딩이 없으면 왼손 썸스틱 + WASD/방향키 자동 바인딩
+        // 로비/오버뷰 시점(게임 시작 전)에서는 XR Origin이 상단 뷰에 있더라도 캐릭터 모델은 코트 베이스라인에 서 있도록 유지
+        if (GameManager.Instance != null && !GameManager.Instance.isGameStarted)
+        {
+            transform.position = new Vector3(-0.06f, 1.013f, -1.499f);
+            transform.rotation = Quaternion.Euler(0f, 180f, 0f);
+        }
+        else if (rigTransform != null && transform.parent == rigTransform)
+        {
+            transform.localPosition = new Vector3(0f, 1.013f, 0f);
+            transform.localRotation = Quaternion.identity;
+        }
+    }
+
+    public void SelectRacket(int index)
+    {
+        if (rackets == null || rackets.Length == 0) return;
+        int safeIndex = Mathf.Clamp(index, 0, rackets.Length - 1);
+
+        for (int i = 0; i < rackets.Length; i++)
+        {
+            if (rackets[i] != null)
+            {
+                bool active = (i == safeIndex);
+                rackets[i].SetActive(active);
+
+                // UI 레이캐스트를 가리지 않도록 라켓 콜라이더를 Trigger로 유지
+                Collider col = rackets[i].GetComponent<Collider>();
+                if (col != null) col.isTrigger = true;
+
+                if (active)
+                {
+                    Transform childCenter = rackets[i].transform.Find("Strings");
+                    if (childCenter == null) childCenter = rackets[i].transform.Find("Center");
+                    racketCenter = (childCenter != null) ? childCenter : rackets[i].transform;
+                }
+            }
+        }
+    }
+
+    public void ApplyCharacterPreset(int charIndex)
+    {
+        // 캐릭터 인덱스에 따른 능력치 및 외형 컬러 프리셋 적용
+        float speedBonus = 1.0f;
+        Color tintColor = Color.white;
+
+        switch (charIndex % 4)
+        {
+            case 0: // 에메랄드 히로인 (밸런스)
+                speedBonus = 1.0f;
+                powerShotChance = 15f;
+                tintColor = Color.white;
+                break;
+            case 1: // 스카이 스트라이커 (스피드)
+                speedBonus = 1.25f;
+                powerShotChance = 10f;
+                tintColor = new Color(0.7f, 0.9f, 1.0f, 1f);
+                break;
+            case 2: // 크림슨 스매셔 (파워)
+                speedBonus = 0.92f;
+                powerShotChance = 35f;
+                tintColor = new Color(1.0f, 0.72f, 0.75f, 1f);
+                break;
+            case 3: // 골든 챔피언 (올라운더)
+                speedBonus = 1.12f;
+                powerShotChance = 25f;
+                tintColor = new Color(1.0f, 0.92f, 0.65f, 1f);
+                break;
+        }
+
+        float settingMultiplier = (GameManager.Instance != null) ? GameManager.Instance.playerSpeedMultiplier : 1.0f;
+        moveSpeed = baseMoveSpeed * speedBonus * settingMultiplier;
+
+        SkinnedMeshRenderer smr = GetComponentInChildren<SkinnedMeshRenderer>(true);
+        if (smr != null && smr.material != null)
+        {
+            if (smr.material.HasProperty("_BaseColor"))
+                smr.material.SetColor("_BaseColor", tintColor);
+            else if (smr.material.HasProperty("_Color"))
+                smr.material.color = tintColor;
+        }
+    }
+
+    void SetupControllersAndActions()
+    {
+        if (vrLeftHand == null && rigTransform != null)
+        {
+            Transform leftTf = rigTransform.Find("Camera Offset/Left Controller");
+            if (leftTf != null) vrLeftHand = leftTf;
+        }
+        if (vrRightHand == null && rigTransform != null)
+        {
+            Transform rightTf = rigTransform.Find("Camera Offset/Right Controller");
+            if (rightTf != null) vrRightHand = rightTf;
+        }
+
+        // VR 컨트롤러 전용 입력 바인딩
         if (moveAction.action == null || moveAction.action.bindings.Count == 0)
         {
             var action = new InputAction("VRMove", InputActionType.Value);
-            action.AddCompositeBinding("2DVector")
-                .With("Up", "<Keyboard>/w")
-                .With("Down", "<Keyboard>/s")
-                .With("Left", "<Keyboard>/a")
-                .With("Right", "<Keyboard>/d");
-            action.AddCompositeBinding("2DVector")
-                .With("Up", "<Keyboard>/upArrow")
-                .With("Down", "<Keyboard>/downArrow")
-                .With("Left", "<Keyboard>/leftArrow")
-                .With("Right", "<Keyboard>/rightArrow");
             action.AddBinding("<XRController>{LeftHand}/thumbstick");
-            action.AddBinding("<Gamepad>/leftStick");
+            action.AddBinding("<XRController>{LeftHand}/primary2DAxis");
             action.Enable();
             moveAction = new InputActionProperty(action);
         }
@@ -124,11 +197,9 @@ public class VRPlayerController : MonoBehaviour
             moveAction.action.Enable();
         }
 
-        // 2. Slide Action: 바인딩이 없으면 왼손 프라이머리 버튼/Grip + Shift 자동 바인딩
         if (slideAction.action == null || slideAction.action.bindings.Count == 0)
         {
             var action = new InputAction("VRSlide", InputActionType.Button);
-            action.AddBinding("<Keyboard>/leftShift");
             action.AddBinding("<XRController>{LeftHand}/primaryButton");
             action.AddBinding("<XRController>{LeftHand}/gripPressed");
             action.Enable();
@@ -139,14 +210,12 @@ public class VRPlayerController : MonoBehaviour
             slideAction.action.Enable();
         }
 
-        // 3. Toss / Hit Action: 바인딩이 없으면 트리거 + Space/마우스클릭 자동 바인딩
         if (tossAction.action == null || tossAction.action.bindings.Count == 0)
         {
-            var action = new InputAction("VRToss", InputActionType.Button);
-            action.AddBinding("<Keyboard>/space");
-            action.AddBinding("<Mouse>/leftButton");
+            var action = new InputAction("VRTossAndSwing", InputActionType.Button);
             action.AddBinding("<XRController>{LeftHand}/triggerPressed");
             action.AddBinding("<XRController>{RightHand}/triggerPressed");
+            action.AddBinding("<XRController>{RightHand}/primaryButton");
             action.Enable();
             tossAction = new InputActionProperty(action);
         }
@@ -156,50 +225,37 @@ public class VRPlayerController : MonoBehaviour
         }
     }
 
-    private bool IsTossOrSwingPressed()
+    private bool IsVRTriggerOrSwingButtonPressed()
     {
-        if (Input.GetKeyDown(KeyCode.Space) || Input.GetKey(KeyCode.Space) || Input.GetMouseButtonDown(0) || Input.GetMouseButton(0)) return true;
-        if (Keyboard.current != null && (Keyboard.current.spaceKey.wasPressedThisFrame || Keyboard.current.spaceKey.isPressed)) return true;
-        if (Mouse.current != null && (Mouse.current.leftButton.wasPressedThisFrame || Mouse.current.leftButton.isPressed)) return true;
-        if (tossAction.action != null && (tossAction.action.triggered || tossAction.action.IsPressed())) return true;
+        if (tossAction.action != null && (tossAction.action.triggered || tossAction.action.IsPressed()))
+            return true;
         return false;
     }
 
-    private bool IsSlidePressed()
+    private bool IsVRSlidePressed()
     {
-        if (Input.GetKeyDown(KeyCode.LeftShift) || Input.GetKeyDown(KeyCode.RightShift)) return true;
-        if (Keyboard.current != null && (Keyboard.current.leftShiftKey.wasPressedThisFrame || Keyboard.current.rightShiftKey.wasPressedThisFrame)) return true;
-        if (slideAction.action != null && slideAction.action.triggered) return true;
+        if (slideAction.action != null && slideAction.action.triggered)
+            return true;
         return false;
     }
 
-    private Vector2 ReadMoveInput()
+    private Vector2 ReadVRMoveInput()
     {
-        Vector2 val = Vector2.zero;
         if (moveAction.action != null)
         {
-            val = moveAction.action.ReadValue<Vector2>();
+            return moveAction.action.ReadValue<Vector2>();
         }
-        if (val.sqrMagnitude < 0.001f)
-        {
-            float h = Input.GetAxisRaw("Horizontal");
-            float v = Input.GetAxisRaw("Vertical");
-            val = new Vector2(h, v);
-            if (val.sqrMagnitude > 1f) val.Normalize();
-        }
-        return val;
+        return Vector2.zero;
     }
 
     void Update()
     {
         if (currentBall == null) FindBall();
 
-        // 1. 입력 값 추출
-        Vector2 input = ReadMoveInput();
+        Vector2 input = ReadVRMoveInput();
         float moveX = input.x;
         float moveZ = input.y;
 
-        // 2. 애니메이터 업데이트
         if (animator != null)
         {
             float animSpeed = isSliding ? 1.5f : 1.0f;
@@ -207,10 +263,18 @@ public class VRPlayerController : MonoBehaviour
             animator.SetFloat("MoveZ", moveZ * animSpeed, 0.1f, Time.deltaTime);
         }
 
-        if (GameManager.Instance == null || !GameManager.Instance.isGameStarted) return;
+        if (GameManager.Instance == null || !GameManager.Instance.isGameStarted || GameManager.Instance.isGamePaused)
+        {
+            if (vrLeftHand != null) lastLeftHandPos = vrLeftHand.position;
+            if (vrRightHand != null) lastRightHandPos = vrRightHand.position;
+            return;
+        }
 
         HandleMovement(moveX, moveZ);
         HandleServeAndHit();
+
+        if (vrLeftHand != null) lastLeftHandPos = vrLeftHand.position;
+        if (vrRightHand != null) lastRightHandPos = vrRightHand.position;
     }
 
     void HandleMovement(float moveX, float moveZ)
@@ -218,9 +282,27 @@ public class VRPlayerController : MonoBehaviour
         if (isSliding) return;
 
         Transform targetTf = (rigTransform != null) ? rigTransform : transform;
-        Vector3 moveDir = new Vector3(moveX, 0, moveZ);
+        // 코트 방향(카메라가 -Z를 바라봄)에 맞춰 조이스틱 입력을 월드 이동으로 변환
+        Camera cam = Camera.main;
+        Vector3 forward = Vector3.back;
+        Vector3 right = Vector3.left;
+        if (cam != null)
+        {
+            forward = cam.transform.forward;
+            forward.y = 0f;
+            if (forward.sqrMagnitude > 0.001f) forward.Normalize();
+            else forward = Vector3.back;
 
-        if (IsSlidePressed() && moveDir.sqrMagnitude > 0.01f)
+            right = cam.transform.right;
+            right.y = 0f;
+            if (right.sqrMagnitude > 0.001f) right.Normalize();
+            else right = Vector3.left;
+        }
+
+        Vector3 moveDir = (right * moveX + forward * moveZ);
+        if (moveDir.sqrMagnitude > 1f) moveDir.Normalize();
+
+        if (IsVRSlidePressed() && moveDir.sqrMagnitude > 0.05f)
         {
             StartCoroutine(SlideRoutine(moveDir.normalized));
             return;
@@ -239,19 +321,16 @@ public class VRPlayerController : MonoBehaviour
 
     Vector3 GetServePosition()
     {
-        // 1. 유효한 왼손 트래킹 위치가 있는지 확인 (지정되어 있고, 바닥/원점 (0,0,0) 근처가 아닌 정상 높이일 때)
         if (vrLeftHand != null && vrLeftHand.position.y > 0.4f && Vector3.Distance(vrLeftHand.position, Vector3.zero) > 0.5f)
         {
-            return vrLeftHand.position;
+            return vrLeftHand.position + Vector3.up * 0.12f;
         }
-        // 2. 지정된 ServePoint가 있으면 사용
         if (servePoint != null)
         {
             return servePoint.position;
         }
-        // 3. 폴백: 플레이어 앞 0.8m, 높이 1.4m
         Transform targetTf = (rigTransform != null) ? rigTransform : transform;
-        return targetTf.position + targetTf.forward * 0.8f + Vector3.up * 1.4f;
+        return targetTf.position + Vector3.back * 0.8f + Vector3.up * 1.4f;
     }
 
     void HandleServeAndHit()
@@ -262,11 +341,14 @@ public class VRPlayerController : MonoBehaviour
             if (currentBall == null) return;
         }
 
-        // 1. 서브 대기 상태 (플레이어 앞 또는 왼손에 공 위치 고정)
+        float dt = Mathf.Max(Time.deltaTime, 0.001f);
+        float rightHandSpeed = (vrRightHand != null) ? Vector3.Distance(vrRightHand.position, lastRightHandPos) / dt : 0f;
+
+        // 1. 서브 대기 상태 (왼손 또는 서브 포인트에 공 고정)
         if (isServing && !isBallTossed)
         {
             currentBall.transform.position = GetServePosition();
-            
+
             Rigidbody ballRb = currentBall.GetComponent<Rigidbody>();
             if (ballRb != null && !ballRb.isKinematic)
             {
@@ -275,24 +357,22 @@ public class VRPlayerController : MonoBehaviour
                 ballRb.isKinematic = true;
             }
 
-            // 토스 감지 (트리거/스페이스/클릭 또는 손의 위쪽 가속)
-            bool tossTriggered = IsTossOrSwingPressed();
+            bool tossTriggered = IsVRTriggerOrSwingButtonPressed();
             if (vrLeftHand != null && vrLeftHand.position.y > 0.4f)
             {
-                float handVelocityY = (vrLeftHand.position.y - lastHandPos.y) / Time.deltaTime;
+                float handVelocityY = (vrLeftHand.position.y - lastLeftHandPos.y) / dt;
                 if (handVelocityY > vrTossThreshold) tossTriggered = true;
-                lastHandPos = vrLeftHand.position;
             }
 
             if (tossTriggered)
             {
-                Debug.Log("<color=cyan>[VRPlayerController]</color> 서브 토스 발동!");
                 TossBall();
+                SendHaptic(true, 0.4f, 0.1f);
                 return;
             }
         }
-        
-        // 2. 타격 감지 (서브 토스 후 공중 체공 중이거나, 일반 랠리 중일 때)
+
+        // 2. 타격 감지 (서브 토스 후 또는 일반 랠리 중)
         bool canHit = !isServing || (isServing && isBallTossed);
 
         if (canHit && !IsSwinging && currentBall != null)
@@ -300,16 +380,12 @@ public class VRPlayerController : MonoBehaviour
             Transform hitOrigin = (racketCenter != null) ? racketCenter : transform;
             float dist = Vector3.Distance(hitOrigin.position, currentBall.transform.position);
 
-            // 트리거/스페이스/마우스 클릭에 의한 스윙
-            bool swingRequested = IsTossOrSwingPressed();
-
-            // 스윙 버튼 입력 시 사거리 내 타격 또는, 적이 쳐서 다가오는 공이 사거리 안에 들어왔을 때 자동 타격 지원
+            bool swingRequested = IsVRTriggerOrSwingButtonPressed() || (rightHandSpeed >= swingVelocityThreshold);
             Rigidbody ballRb = currentBall.GetComponent<Rigidbody>();
             bool isBallApproaching = (ballRb != null && ballRb.linearVelocity.z > 0.2f);
 
-            if ((swingRequested && dist <= (hitRange + 2.0f)) || (dist <= hitRange && isBallApproaching))
+            if ((swingRequested && dist <= (hitRange + 1.8f)) || (dist <= hitRange && isBallApproaching))
             {
-                Debug.Log("<color=yellow>[VRPlayerController]</color> 타격 발동 (거리: " + dist + ")");
                 StartCoroutine(DelayedHitRoutine());
             }
         }
@@ -319,19 +395,19 @@ public class VRPlayerController : MonoBehaviour
     {
         IsSwinging = true;
         if (animator != null) animator.SetTrigger("hit");
-        
+
         yield return new WaitForSeconds(hitDelay);
 
-        if (currentBall != null)
+        if (currentBall != null && (GameManager.Instance == null || !GameManager.Instance.isGamePaused))
         {
             Transform hitOrigin = (racketCenter != null) ? racketCenter : transform;
             float dist = Vector3.Distance(hitOrigin.position, currentBall.transform.position);
-            if (dist <= hitRange + 1.5f)
+            if (dist <= hitRange + 2.0f)
             {
                 ApplyHitVelocity();
             }
         }
-        
+
         yield return new WaitForSeconds(0.2f);
         IsSwinging = false;
     }
@@ -340,7 +416,11 @@ public class VRPlayerController : MonoBehaviour
     {
         isServing = true;
         isBallTossed = false;
-        currentRallySpeedMultiplier = 1.0f; 
+        currentRallySpeedMultiplier = 1.0f;
+        Transform targetTf = (rigTransform != null) ? rigTransform : transform;
+        targetTf.position = startPosition;
+        targetTf.rotation = startRotation;
+
         if (currentBall == null) FindBall();
         if (currentBall != null)
         {
@@ -383,12 +463,10 @@ public class VRPlayerController : MonoBehaviour
     {
         if (currentBall == null) return;
 
-        currentRallySpeedMultiplier += 0.05f; 
+        currentRallySpeedMultiplier += 0.05f;
         bool isPowerShot = Random.Range(0f, 100f) < powerShotChance;
-        
-        // 타격감 효과
-        Time.timeScale = 0.5f;
-        Invoke("ResetTime", 0.05f);
+
+        SendHaptic(false, isPowerShot ? 0.85f : 0.55f, 0.12f);
 
         Vector3 randomTarget = GetRandomTargetPoint();
         float baseFlightTime = isPowerShot ? minFlightTime * 0.85f : Random.Range(minFlightTime, maxFlightTime);
@@ -408,22 +486,32 @@ public class VRPlayerController : MonoBehaviour
             Vector3 exactVelocity = CalculateVelocity(randomTarget, currentBall.transform.position, finalFlightTime);
             ballRb.linearVelocity = exactVelocity;
         }
-        
+
         isServing = false;
         isBallTossed = false;
         currentBall.ResetBounceCount();
     }
 
-    void ResetTime() { Time.timeScale = 1.0f; }
+    private void SendHaptic(bool leftHand, float amplitude, float duration)
+    {
+        Transform handTf = leftHand ? vrLeftHand : vrRightHand;
+        if (handTf != null)
+        {
+            var haptic = handTf.GetComponentInChildren<HapticImpulsePlayer>();
+            if (haptic != null)
+            {
+                haptic.SendHapticImpulse(amplitude, duration);
+            }
+        }
+    }
 
     Vector3 GetRandomTargetPoint()
     {
-        if (opponentCourtArea == null) 
+        if (opponentCourtArea == null)
         {
             return new Vector3(Random.Range(-3f, 3f), 0.1f, Random.Range(-24f, -20f));
         }
         Bounds bounds = opponentCourtArea.bounds;
-        // 아웃 방지를 위해 코트 테두리 15% 안쪽으로 조준
         float marginX = bounds.size.x * 0.15f;
         float marginZ = bounds.size.z * 0.15f;
         float randomX = Random.Range(bounds.min.x + marginX, bounds.max.x - marginX);
@@ -433,8 +521,9 @@ public class VRPlayerController : MonoBehaviour
 
     public void OnRacketHit()
     {
-        if (Time.time - lastPhysicalHitTime < 0.25f) return;
-        lastPhysicalHitTime = Time.time;
+        if (GameManager.Instance == null || !GameManager.Instance.isGameStarted || GameManager.Instance.isGamePaused) return;
+        if (Time.unscaledTime - lastPhysicalHitTime < 0.25f) return;
+        lastPhysicalHitTime = Time.unscaledTime;
 
         if (currentBall == null) FindBall();
         if (currentBall == null) return;
@@ -442,6 +531,8 @@ public class VRPlayerController : MonoBehaviour
         if (isServing && !isBallTossed)
         {
             TossBall();
+            SendHaptic(true, 0.4f, 0.1f);
+            return;
         }
 
         ApplyHitVelocity();
@@ -458,7 +549,6 @@ public class VRPlayerController : MonoBehaviour
         float gravity = Mathf.Abs(Physics.gravity.y);
         float flightTime = Mathf.Max(0.5f, time);
 
-        // 네트를 안전하게 넘기기 위한 최소 체공 시간 계산
         if (netPoint != null)
         {
             Vector3 toNet = netPoint.position - origin;
@@ -486,7 +576,6 @@ public class VRPlayerController : MonoBehaviour
             }
         }
 
-        // 보정된 실제 체공 시간에 맞춘 정밀 수평/수직 속도
         float Vxz = distXZMag / flightTime;
         float Vy = (target.y - origin.y) / flightTime + 0.5f * gravity * flightTime;
 
@@ -498,7 +587,7 @@ public class VRPlayerController : MonoBehaviour
     void FindBall()
     {
         currentBall = Object.FindFirstObjectByType<Ball>();
-        if (currentBall != null) 
+        if (currentBall != null)
         {
             Collider ballCollider = currentBall.GetComponent<Collider>();
             Collider myCollider = GetComponent<Collider>();
@@ -512,7 +601,7 @@ public class VRPlayerController : MonoBehaviour
     IEnumerator SlideRoutine(Vector3 direction)
     {
         Transform targetTf = (rigTransform != null) ? rigTransform : transform;
-        if (direction == Vector3.zero) direction = targetTf.forward;
+        if (direction == Vector3.zero) direction = Vector3.back;
         isSliding = true;
         float timer = 0f;
         while (timer < slideDuration)
@@ -535,7 +624,11 @@ public class VRPlayerController : MonoBehaviour
     {
         isServing = false;
         isBallTossed = false;
-        Transform targetTf = (rigTransform != null) ? rigTransform : transform;
-        targetTf.position = startPosition;
+        if (GameManager.Instance == null || GameManager.Instance.isGameStarted)
+        {
+            Transform targetTf = (rigTransform != null) ? rigTransform : transform;
+            targetTf.position = startPosition;
+            targetTf.rotation = startRotation;
+        }
     }
 }
