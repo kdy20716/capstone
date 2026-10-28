@@ -858,3 +858,168 @@ body {
   .inspect-canvas-wrapper  { height: 340px; }
   .inspect-drag-hint       { font-size: 0.7rem; gap: 8px; }
 }
+
+
+/* =========================================================
+   Center Showcase: Theme Intro Hero Cards (Tennis, Bowling, Sword)
+========================================================= */
+.floating-story-card.theme-intro-card {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.floating-story-card.theme-intro-card .theme-intro-box {
+  width: min(560px, 72vw);
+  background: rgba(8, 22, 50, 0.82);
+  backdrop-filter: blur(26px);
+  -webkit-backdrop-filter: blur(26px);
+  border: 1.8px solid rgba(255, 255, 255, 0.32);
+  border-radius: 32px;
+  overflow: hidden;
+  box-shadow:
+    0 32px 90px rgba(0, 15, 45, 0.72),
+    0 0 45px rgba(56, 189, 248, 0.28),
+    0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+  transform: scale(0.90) translateY(50px);
+  opacity: 0;
+  transition:
+    transform 0.65s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.52s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.floating-story-card.theme-intro-card.active {
+  pointer-events: auto;
+}
+
+.floating-story-card.theme-intro-card.active .theme-intro-box {
+  transform: scale(1) translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.floating-story-card.theme-intro-card.slide-out-up .theme-intro-box {
+  transform: scale(1.08) translateY(-60px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.floating-story-card.theme-intro-card.slide-out-down .theme-intro-box {
+  transform: scale(0.88) translateY(60px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.theme-intro-banner-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+  background: #020617;
+}
+
+.theme-intro-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.floating-story-card.theme-intro-card.active .theme-intro-img {
+  transform: scale(1.03);
+}
+
+.theme-intro-overlay-glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    180deg,
+    rgba(0, 0, 0, 0.05) 0%,
+    rgba(0, 0, 0, 0.2) 60%,
+    rgba(8, 22, 50, 0.95) 100%
+  );
+}
+
+.theme-intro-caption {
+  padding: 16px 24px 20px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+}
+
+.theme-intro-badge {
+  display: inline-block;
+  background: linear-gradient(90deg, rgba(0, 162, 255, 0.3), rgba(0, 230, 255, 0.3));
+  border: 1px solid rgba(120, 220, 255, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: #dbeafe;
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  padding: 6px 18px;
+  border-radius: var(--radius-pill);
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+}
+
+.theme-intro-title {
+  font-size: 1.6rem;
+  font-weight: 900;
+  letter-spacing: -0.6px;
+  color: white;
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.6);
+  line-height: 1.2;
+}
+
+.theme-intro-sub {
+  font-size: 0.92rem;
+  color: rgba(240, 248, 255, 0.88);
+  font-weight: 500;
+  max-width: 620px;
+  line-height: 1.5;
+}
+
+.theme-intro-scroll-hint {
+  margin-top: 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  padding: 8px 20px;
+  border-radius: var(--radius-pill);
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #ffffff;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  animation: hintPulse 1.8s ease-in-out infinite;
+}
+
+.theme-intro-scroll-hint .hint-arrow {
+  color: #38bdf8;
+  font-size: 1rem;
+  animation: bounceHintArrow 1.2s ease-in-out infinite;
+}
+
+@keyframes bounceHintArrow {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(4px); }
+}
+
+@keyframes hintPulse {
+  0%, 100% { transform: scale(1); opacity: 0.95; }
+  50% { transform: scale(1.02); opacity: 1; }
+}
+
+@media (max-width: 768px) {
+  .floating-story-card.theme-intro-card .theme-intro-box { width: 92vw; border-radius: 20px; }
+  .theme-intro-title { font-size: 1.45rem; }
+  .theme-intro-sub { font-size: 0.88rem; }
+  .theme-intro-caption { padding: 16px 20px 22px; }
+  .theme-intro-scroll-hint { font-size: 0.78rem; padding: 6px 14px; }
+}

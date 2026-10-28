@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 /* =========================================================================
    스포츠별 3D 모델 및 리깅(애니메이션) 에셋 레지스트리
@@ -86,6 +87,23 @@ export class ModelInspectModalViewer {
     this.renderer.setSize(w, h);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    // [그래픽 업그레이드] 영화 같은 톤매핑 + 스튜디오 IBL 환경광
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.05;
+
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+    // 텍스처 sRGB 색공간 보정 + 이방성 필터링
+    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const rawLoad = this.textureLoader.load.bind(this.textureLoader);
+    this.textureLoader.load = (url, onLoad, onProgress, onError) => {
+      const tex = rawLoad(url, onLoad, onProgress, onError);
+      if (!/normal/i.test(String(url))) tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = maxAniso;
+      return tex;
+    };
 
     this.container.innerHTML = '';
     this.container.appendChild(this.renderer.domElement);
@@ -96,19 +114,39 @@ export class ModelInspectModalViewer {
   }
 
   initLights() {
-    const amb = new THREE.AmbientLight(0xffffff, 1.4);
+    const amb = new THREE.AmbientLight(0xffffff, 0.45);
     this.scene.add(amb);
 
-    const dir = new THREE.DirectionalLight(0xffffff, 1.8);
+    const dir = new THREE.DirectionalLight(0xfff3e0, 2.2);
     dir.position.set(5, 10, 8);
     dir.castShadow = true;
-    dir.shadow.bias = -0.0006;
-    dir.shadow.normalBias = 0.04;
+    dir.shadow.mapSize.set(2048, 2048);
+    dir.shadow.camera.left = -8;
+    dir.shadow.camera.right = 8;
+    dir.shadow.camera.top = 8;
+    dir.shadow.camera.bottom = -8;
+    dir.shadow.camera.near = 1;
+    dir.shadow.camera.far = 40;
+    dir.shadow.radius = 3;
+    dir.shadow.bias = -0.0004;
+    dir.shadow.normalBias = 0.03;
     this.scene.add(dir);
 
-    const fill = new THREE.DirectionalLight(0x7dd3fc, 0.8);
+    // 림 라이트: 모델 윤곽을 또렷하게
+    const fill = new THREE.DirectionalLight(0x7dd3fc, 1.1);
     fill.position.set(-5, 5, -5);
     this.scene.add(fill);
+
+    // 바닥 접지 그림자 (clearModel에서 제거되지 않도록 keep 표시)
+    const shadowPlane = new THREE.Mesh(
+      new THREE.PlaneGeometry(40, 40),
+      new THREE.ShadowMaterial({ opacity: 0.28 })
+    );
+    shadowPlane.rotation.x = -Math.PI / 2;
+    shadowPlane.position.y = 0.002;
+    shadowPlane.receiveShadow = true;
+    shadowPlane.userData.keep = true;
+    this.scene.add(shadowPlane);
   }
 
   initControls() {
@@ -149,7 +187,7 @@ export class ModelInspectModalViewer {
     // 기존에 씬에 남아있을 수 있는 모델(T-포즈 잔여물 등) 완전 스윕 제거
     const toRemove = [];
     this.scene.children.forEach((child) => {
-      if (!child.isLight && !child.isGridHelper) {
+      if (!child.isLight && !child.isGridHelper && !child.userData.keep) {
         toRemove.push(child);
       }
     });

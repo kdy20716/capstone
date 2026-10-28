@@ -14,6 +14,26 @@ function initApp() {
     }
   }
 
+  // (확인용) ?tod=day|sunset|night 로 시간대 강제 지정
+  const stepParam = new URLSearchParams(location.search).get('step');
+  if (stepParam !== null) {
+    const initIdx = parseInt(stepParam, 10);
+    setTimeout(() => {
+      if (typeof goToStep === 'function') {
+        goToStep(initIdx, true);
+        targetProgress = stepProgressMap[initIdx] || 0;
+        currentAnimatedProgress = targetProgress;
+        if (islandViewer) {
+          islandViewer.updateCameraForScroll(targetProgress);
+          if (islandViewer.targetCamPos) islandViewer.currentCamPos.copy(islandViewer.targetCamPos);
+          if (islandViewer.targetLookAt) islandViewer.currentLookAt.copy(islandViewer.targetLookAt);
+        }
+      }
+    }, 500);
+  }
+  const todParam = new URLSearchParams(location.search).get('tod');
+  if (islandViewer && todParam) islandViewer.setTimeOfDay(todParam);
+
   // 2. Initialize Model Inspect Modal Viewer
   const inspectCanvas = document.getElementById('inspect-canvas-container');
   if (inspectCanvas) {
@@ -143,39 +163,45 @@ function initApp() {
   const heroLogo = document.getElementById('hero-brand-container');
 
   let currentActiveIndex = 0;
-  const TOTAL_STEPS = 11; // 0: 하늘(낮), 1~3: 테니스(낮), 4~6: 볼링(노을), 7~9: 검술(밤), 10: 항공뷰 피날레(밤)
+  const TOTAL_STEPS = 14; // 0: 하늘(낮), 1: 테니스 인트로, 2~4: 테니스 설명, 5: 볼링 인트로(노을), 6~8: 볼링 설명, 9: 검술 인트로(밤), 10~12: 검술 설명, 13: 피날레
   let isTransitioning = false;
   let targetProgress = 0;
   let currentAnimatedProgress = 0;
 
-  // Step별 카메라 시네마틱 위치 매핑 (각 경기장 3스텝 완결 후 장거리 활공)
+  // Step별 카메라 시네마틱 위치 매핑
   const stepProgressMap = [
     0.0,   // Step 0: 오프닝 스카이뷰 (낮)
-    0.10,  // Step 1: 🎾 테니스 코트 전경 (낮)
-    0.18,  // Step 2: 🎾 테니스 랠리 & 피직스 (낮)
-    0.26,  // Step 3: 🎾 테니스 라켓 & 장비 (낮)
-    0.44,  // Step 4: 🎳 볼링 돔 전경 (노을)
-    0.52,  // Step 5: 🎳 볼링 스핀 훅 & 레인 (노을)
-    0.60,  // Step 6: 🎳 볼링 프로 볼 & 장비 (노을)
-    0.76,  // Step 7: ⚔️ 검술 아레나 전경 (밤)
-    0.84,  // Step 8: ⚔️ 검술 공방 & 패링 (밤)
-    0.90,  // Step 9: ⚔️ 검술 네온 블레이드 & 장비 (밤)
-    1.00   // Step 10: 🏆 3대 경기장 항공뷰 피날레 (밤)
+    0.08,  // Step 1: 🎾 테니스 경기장 외경 인트로 & 테마 일러스트 (낮)
+    0.15,  // Step 2: 🎾 테니스 코트 전경 (낮)
+    0.21,  // Step 3: 🎾 테니스 랠리 & 피직스 (낮)
+    0.27,  // Step 4: 🎾 테니스 라켓 & 장비 (낮)
+    0.44,  // Step 5: 🎳 볼링 경기장 외경 인트로 & 테마 일러스트 (노을)
+    0.51,  // Step 6: 🎳 볼링 돔 전경 (노을)
+    0.57,  // Step 7: 🎳 볼링 스핀 훅 & 레인 (노을)
+    0.63,  // Step 8: 🎳 볼링 프로 볼 & 장비 (노을)
+    0.78,  // Step 9: ⚔️ 검술 경기장 외경 인트로 & 테마 일러스트 (밤)
+    0.84,  // Step 10: ⚔️ 검술 아레나 전경 (밤)
+    0.89,  // Step 11: ⚔️ 검술 공방 & 패링 (밤)
+    0.94,  // Step 12: ⚔️ 검술 네온 블레이드 & 장비 (밤)
+    1.00   // Step 13: 🏆 3대 경기장 항공뷰 피날레 (밤)
   ];
 
-  // 경기장별 시간대 매핑: 테니스(0~3)=낮, 볼링(4~6)=노을, 검술/항공뷰(7~10)=밤
+  // 경기장별 시간대 매핑: 테니스(0~4)=낮, 볼링(5~8)=노을, 검술/항공뷰(9~13)=밤
   const stepTimeMap = {
     0: 'day',
     1: 'day',
     2: 'day',
     3: 'day',
-    4: 'sunset',
+    4: 'day',
     5: 'sunset',
     6: 'sunset',
-    7: 'night',
-    8: 'night',
+    7: 'sunset',
+    8: 'sunset',
     9: 'night',
-    10: 'night'
+    10: 'night',
+    11: 'night',
+    12: 'night',
+    13: 'night'
   };
 
   let enterStadiumTimer = null;
@@ -198,9 +224,9 @@ function initApp() {
     // 카메라가 여유롭게 날아간 뒤 카드가 뜨도록 부드러운 타이밍 연출
     const isCrossFlight = (
       (newIndex === 1 && currentActiveIndex === 0) ||
-      (currentActiveIndex <= 3 && newIndex >= 4) ||
-      (currentActiveIndex >= 4 && currentActiveIndex <= 6 && newIndex >= 7) ||
-      (currentActiveIndex <= 9 && newIndex === 10) ||
+      (currentActiveIndex <= 4 && newIndex >= 5) ||
+      (currentActiveIndex >= 5 && currentActiveIndex <= 8 && newIndex >= 9) ||
+      (currentActiveIndex <= 12 && newIndex === 13) ||
       (newIndex === 0)
     );
 

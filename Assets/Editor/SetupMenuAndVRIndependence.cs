@@ -8,8 +8,46 @@ using TMPro;
 using System.Collections.Generic;
 using System.Linq;
 
+[InitializeOnLoad]
 public class SetupMenuAndVRIndependence
 {
+    static SetupMenuAndVRIndependence()
+    {
+        EditorApplication.update -= CheckPlayTriggers;
+        EditorApplication.update += CheckPlayTriggers;
+
+        EditorApplication.delayCall += () =>
+        {
+            if (UnityMCPServer.Core.UnityMCPServer.Status == UnityMCPServer.Models.McpStatus.Error)
+            {
+                UnityMCPServer.Core.UnityMCPServer.Restart();
+            }
+        };
+    }
+
+    private static void CheckPlayTriggers()
+    {
+        var playFlag = GameObject.Find("TRIGGER_PLAY_MODE");
+        if (playFlag != null)
+        {
+            Object.DestroyImmediate(playFlag);
+            EditorApplication.isPlaying = true;
+        }
+        var stopFlag = GameObject.Find("TRIGGER_STOP_MODE");
+        if (stopFlag != null)
+        {
+            Object.DestroyImmediate(stopFlag);
+            EditorApplication.isPlaying = false;
+        }
+    }
+
+    [MenuItem("Tools/Capstone/Execute and Play Match")]
+    public static void ExecuteAndPlayMatch()
+    {
+        Execute();
+        EditorApplication.isPlaying = true;
+    }
+
     [MenuItem("Tools/Capstone/Setup Menu and VR Independence")]
     public static void Execute()
     {
@@ -107,7 +145,38 @@ public class SetupMenuAndVRIndependence
             out GameObject victoryPanel,
             out GameObject losePanel);
 
-        // 9. Configure GameManager
+        // 9. Configure GameManager and ViewPoints (45-degree diagonal overview viewpoint)
+        GameObject overviewGo = allGos.FirstOrDefault(g => g != null && (g.name == "Overview_60Deg_ViewPoint" || g.name == "Overview_Diagonal_ViewPoint"));
+        if (overviewGo == null) overviewGo = new GameObject("Overview_Diagonal_ViewPoint");
+        overviewGo.name = "Overview_Diagonal_ViewPoint";
+        overviewGo.transform.position = new Vector3(11.0f, 13.5f, -3.5f);
+        overviewGo.transform.rotation = Quaternion.Euler(39.0f, 225.0f, 0f);
+        EditorUtility.SetDirty(overviewGo);
+
+        GameObject baselineGo = allGos.FirstOrDefault(g => g != null && g.name == "Player_Baseline_ViewPoint");
+        if (baselineGo == null) baselineGo = new GameObject("Player_Baseline_ViewPoint");
+        baselineGo.transform.position = new Vector3(-0.06f, 0.0f, -1.499f);
+        baselineGo.transform.rotation = Quaternion.Euler(0f, 180f, 0f);
+        EditorUtility.SetDirty(baselineGo);
+
+        // Configure Ball Audio Clips
+        Ball ball = allGos.Select(g => g != null ? g.GetComponent<Ball>() : null).FirstOrDefault(b => b != null);
+        if (ball != null)
+        {
+            AudioClip hitClip = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/tennis_tang_hit.wav") ?? AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/tennis_racket_hit.wav");
+            AudioClip powerClip = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/tennis_power_tang.wav");
+            AudioClip bounceClip = AssetDatabase.LoadAssetAtPath<AudioClip>("Assets/Audio/tennis_court_bounce.wav");
+            ball.hitSound = hitClip;
+            ball.powerHitSound = powerClip;
+            ball.bounceSound = bounceClip;
+            AudioSource aSrc = ball.GetComponent<AudioSource>();
+            if (aSrc == null) aSrc = ball.gameObject.AddComponent<AudioSource>();
+            aSrc.playOnAwake = false;
+            aSrc.spatialBlend = 0.5f;
+            EditorUtility.SetDirty(ball);
+            EditorUtility.SetDirty(aSrc);
+        }
+
         GameObject gmGo = allGos.FirstOrDefault(g => g != null && g.name == "GameManager");
         if (gmGo != null)
         {
@@ -118,6 +187,9 @@ public class SetupMenuAndVRIndependence
                 gm.isGameStarted = false;
                 gm.isGamePaused = false;
                 gm.vrPlayerRig = xrOriginGo;
+
+                gm.overviewViewPoint = overviewGo.transform;
+                gm.playerViewPoint = baselineGo.transform;
 
                 gm.vrMenuCanvas = vrMenuCanvas;
                 gm.vrMainMenuPanel = mainMenuPanel;
@@ -150,11 +222,449 @@ public class SetupMenuAndVRIndependence
             }
         }
 
+        // 9.5 Apply scenario override if requested
+        string scenarioFile = "C:/Users/kdy02/.gemini/antigravity/brain/8ee1e380-fc8f-435b-a2bc-2d9e376dce50/scratch/scenario_target.txt";
+        if (!System.IO.File.Exists(scenarioFile))
+        {
+            scenarioFile = Application.dataPath + "/scenario_target.txt";
+        }
+        if (!System.IO.File.Exists(scenarioFile))
+        {
+            scenarioFile = System.IO.Path.Combine(Application.dataPath, "../scenario_target.txt");
+        }
+        if (System.IO.File.Exists(scenarioFile))
+        {
+            string target = System.IO.File.ReadAllText(scenarioFile).Trim();
+            Debug.Log("<color=yellow>[VR Tennis Scenario]</color> Applying Scenario Target: " + target);
+            ApplyScenarioTarget(target, scene, allGos, vrMenuCanvas, mainMenuPanel, selectionPanel, scoreGo, pauseGo, xrOriginGo);
+        }
+
         // 10. Save Scene and Assets
         EditorSceneManager.MarkSceneDirty(scene);
         EditorSceneManager.SaveScene(scene);
         AssetDatabase.SaveAssets();
         Debug.Log("<color=green>[VR Tennis Setup]</color> Unified VR scene setup complete! PC version removed.");
+    }
+
+    private static void ApplyScenarioTarget(
+        string target,
+        UnityEngine.SceneManagement.Scene scene,
+        GameObject[] oldGos,
+        GameObject vrMenuCanvas,
+        GameObject mainMenuPanel,
+        GameObject vrSelectionUI,
+        GameObject scoreRoot,
+        GameObject pauseObj,
+        GameObject vrPlayerRig)
+    {
+        var allGos = Resources.FindObjectsOfTypeAll<GameObject>()
+            .Where(g => g != null && g.scene == scene)
+            .ToArray();
+
+        var tennisBallRoot = allGos.FirstOrDefault(g => g != null && g.name == "tennis_ball");
+        var ballObj = allGos.FirstOrDefault(g => g != null && g.name == "ball2");
+        if (scoreRoot == null) scoreRoot = vrPlayerRig != null ? vrPlayerRig.transform.Find("Score")?.gameObject : allGos.FirstOrDefault(g => g != null && g.name == "Score");
+        if (pauseObj == null) pauseObj = allGos.FirstOrDefault(g => g != null && (g.name == "pause" || g.name == "PauseMenuCanvas"));
+        var blueRacket = allGos.FirstOrDefault(g => g != null && (g.name == "Tennis_Racket_Blue" || g.name == "tennis_racket_blue"));
+        var rightCtrl = vrPlayerRig != null ? vrPlayerRig.transform.Find("Camera Offset/Right Controller") : null;
+        var leftCtrl = vrPlayerRig != null ? vrPlayerRig.transform.Find("Camera Offset/Left Controller") : null;
+
+        if (target != "1" && target != "2")
+        {
+            if (vrMenuCanvas != null) vrMenuCanvas.SetActive(false);
+            if (mainMenuPanel != null) mainMenuPanel.SetActive(false);
+            if (vrSelectionUI != null) vrSelectionUI.SetActive(false);
+
+            if (vrPlayerRig != null)
+            {
+                vrPlayerRig.transform.position = new Vector3(-0.06f, 0f, -1.499f);
+                vrPlayerRig.transform.rotation = Quaternion.Euler(0f, 180f, 0f);
+            }
+
+            if (rightCtrl != null)
+            {
+                rightCtrl.localPosition = new Vector3(0.25f, 1.05f, 0.45f);
+                rightCtrl.localRotation = Quaternion.identity;
+                EditorUtility.SetDirty(rightCtrl);
+            }
+            if (leftCtrl != null)
+            {
+                leftCtrl.localPosition = new Vector3(-0.25f, 1.05f, 0.45f);
+                leftCtrl.localRotation = Quaternion.identity;
+                EditorUtility.SetDirty(leftCtrl);
+            }
+        }
+
+        switch (target)
+        {
+            case "2": // 45-degree Diagonal Overhead Selection View
+                Debug.Log($"<color=cyan>[Case 2 Debug]</color> mainMenuPanel={(mainMenuPanel != null)} ({mainMenuPanel?.name}), vrSelectionUI={(vrSelectionUI != null)} ({vrSelectionUI?.name})");
+                if (mainMenuPanel != null)
+                {
+                    mainMenuPanel.SetActive(false);
+                    EditorUtility.SetDirty(mainMenuPanel);
+                }
+                if (vrSelectionUI != null)
+                {
+                    vrSelectionUI.SetActive(true);
+                    EditorUtility.SetDirty(vrSelectionUI);
+                }
+                if (vrMenuCanvas != null)
+                {
+                    vrMenuCanvas.SetActive(true);
+                    vrMenuCanvas.transform.position = new Vector3(9.02f, 11.23f, -5.48f);
+                    vrMenuCanvas.transform.rotation = Quaternion.Euler(39.0f, 225.0f, 0f);
+                    vrMenuCanvas.transform.localScale = new Vector3(0.0032f, 0.0032f, 0.0032f);
+                    EditorUtility.SetDirty(vrMenuCanvas);
+                }
+                if (pauseObj != null) { pauseObj.SetActive(false); EditorUtility.SetDirty(pauseObj); }
+                if (scoreRoot != null) { scoreRoot.SetActive(false); EditorUtility.SetDirty(scoreRoot); }
+                if (blueRacket != null) { blueRacket.SetActive(false); EditorUtility.SetDirty(blueRacket); }
+                if (tennisBallRoot != null) { tennisBallRoot.SetActive(false); EditorUtility.SetDirty(tennisBallRoot); }
+                if (vrPlayerRig != null)
+                {
+                    vrPlayerRig.transform.position = new Vector3(11.0f, 13.5f, -3.5f);
+                    vrPlayerRig.transform.rotation = Quaternion.Euler(39.0f, 225.0f, 0f);
+                    EditorUtility.SetDirty(vrPlayerRig);
+                    PrefabUtility.RecordPrefabInstancePropertyModifications(vrPlayerRig.transform);
+                }
+                break;
+
+            case "3": // Baseline Ground Match
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = Vector3.zero;
+                    blueRacket.transform.localEulerAngles = new Vector3(-110.964f, 4.646f, 171.02f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(0.28f, 1.15f, -2.4f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                }
+                break;
+
+            case "4": // Serve Toss
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = Vector3.zero;
+                    blueRacket.transform.localEulerAngles = new Vector3(-110.964f, 4.646f, 171.02f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(0.18f, 1.85f, -3.2f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                }
+                break;
+
+            case "5": // Player Hit Ball
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = new Vector3(0.05f, 0.05f, 0.15f);
+                    blueRacket.transform.localEulerAngles = new Vector3(-80f, -15f, 155f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(0.02f, 1.35f, -5.5f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                }
+                break;
+
+            case "6": // AI Rally Return
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = Vector3.zero;
+                    blueRacket.transform.localEulerAngles = new Vector3(-110.964f, 4.646f, 171.02f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(-0.2f, 1.45f, -8.5f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                }
+                break;
+
+            case "7": // Scoreboard Update (15 : 0)
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+
+                    var ps = scoreRoot.transform.Find("Tennis_Scoreboard_Root/PlayerScore")?.GetComponent<TextMeshProUGUI>();
+                    if (ps != null) ps.text = "PLAYER: 15";
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = Vector3.zero;
+                    blueRacket.transform.localEulerAngles = new Vector3(-110.964f, 4.646f, 171.02f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(-0.25f, 0.12f, -16.0f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                }
+                break;
+
+            case "8": // Pause Menu
+                if (scoreRoot != null) scoreRoot.SetActive(false);
+                if (blueRacket != null) blueRacket.SetActive(false);
+                if (ballObj != null) ballObj.SetActive(false);
+                if (pauseObj != null)
+                {
+                    pauseObj.SetActive(true);
+                    pauseObj.transform.position = new Vector3(-0.06f, 1.48f, -3.2f);
+                    pauseObj.transform.rotation = Quaternion.Euler(0f, 180f, 0f);
+                    pauseObj.transform.localScale = new Vector3(0.0018f, 0.0018f, 0.0018f);
+                }
+                break;
+
+            case "9": // Victory Screen
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (blueRacket != null) blueRacket.SetActive(false);
+                if (ballObj != null) ballObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(false);
+
+                    var vicPanel = scoreRoot.transform.Find("VictoryPanel");
+                    if (vicPanel != null)
+                    {
+                        vicPanel.gameObject.SetActive(true);
+                        vicPanel.localPosition = new Vector3(0f, 0f, 0f);
+                    }
+
+                    var loseP = scoreRoot.transform.Find("LosePanel");
+                    if (loseP != null) loseP.gameObject.SetActive(false);
+                }
+                break;
+
+            case "10": // Defeat Screen
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (blueRacket != null) blueRacket.SetActive(false);
+                if (ballObj != null) ballObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(false);
+
+                    var vicPanel = scoreRoot.transform.Find("VictoryPanel");
+                    if (vicPanel != null) vicPanel.gameObject.SetActive(false);
+
+                    var loseP = scoreRoot.transform.Find("LosePanel");
+                    if (loseP != null)
+                    {
+                        loseP.gameObject.SetActive(true);
+                        loseP.localPosition = new Vector3(0f, 0f, 0f);
+                    }
+                }
+                break;
+
+            case "11": // Rally Gauge 100% Full & Electric Racket Spark
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+
+                    var gRoot = scoreRoot.transform.Find("RallyGauge_Root");
+                    if (gRoot != null)
+                    {
+                        gRoot.gameObject.SetActive(true);
+                        var gLbl = gRoot.Find("GaugeLabel")?.GetComponent<TextMeshProUGUI>();
+                        if (gLbl != null)
+                        {
+                            gLbl.text = "⚡ SMASH READY! ⚡";
+                            gLbl.color = new Color(1f, 0.92f, 0.2f);
+                        }
+                        var bFill = gRoot.Find("BarSlot/BarFill")?.GetComponent<Image>();
+                        if (bFill != null)
+                        {
+                            bFill.fillAmount = 1.0f;
+                            bFill.color = new Color(1f, 0.88f, 0.15f);
+                        }
+                    }
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = new Vector3(0.05f, 0.05f, 0.15f);
+                    blueRacket.transform.localEulerAngles = new Vector3(-80f, -15f, 155f);
+
+                    Transform stringsTf = blueRacket.transform.Find("Strings") ?? blueRacket.transform;
+                    var spark = GameObject.CreatePrimitive(PrimitiveType.Sphere);
+                    spark.name = "Editor_Racket_Spark";
+                    Object.DestroyImmediate(spark.GetComponent<Collider>());
+                    spark.transform.SetParent(stringsTf, false);
+                    spark.transform.localPosition = Vector3.zero;
+                    spark.transform.localScale = new Vector3(0.35f, 0.08f, 0.45f);
+                    var ren = spark.GetComponent<Renderer>();
+                    if (ren != null)
+                    {
+                        var s = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Sprites/Default");
+                        if (s != null)
+                        {
+                            var mat = new Material(s);
+                            mat.color = new Color(0.2f, 0.95f, 1f, 0.85f);
+                            ren.material = mat;
+                        }
+                    }
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(0.25f, 1.25f, -2.8f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                }
+                break;
+
+            case "12": // Super Smash Bullet Shot with Trail
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null)
+                {
+                    scoreRoot.SetActive(true);
+                    var sb = scoreRoot.transform.Find("Tennis_Scoreboard_Root");
+                    if (sb != null) sb.gameObject.SetActive(true);
+                    var vic = scoreRoot.transform.Find("VictoryPanel");
+                    if (vic != null) vic.gameObject.SetActive(false);
+                    var lose = scoreRoot.transform.Find("LosePanel");
+                    if (lose != null) lose.gameObject.SetActive(false);
+                }
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = new Vector3(0.12f, 0.05f, 0.25f);
+                    blueRacket.transform.localEulerAngles = new Vector3(-65f, -30f, 140f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(-0.35f, 1.45f, -7.5f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                    var ballScript = ballObj.GetComponentInParent<Ball>();
+                    if (ballScript != null) ballScript.ActivateSuperSmashTrail(true);
+                }
+                break;
+
+            case "14": // Tang! Hit Impact Effect Showcase
+                if (pauseObj != null) pauseObj.SetActive(false);
+                if (scoreRoot != null) scoreRoot.SetActive(true);
+                if (blueRacket != null)
+                {
+                    blueRacket.SetActive(true);
+                    blueRacket.transform.localPosition = new Vector3(0.08f, 0.08f, 0.22f);
+                    blueRacket.transform.localEulerAngles = new Vector3(-70f, -20f, 150f);
+                }
+                if (tennisBallRoot != null)
+                {
+                    tennisBallRoot.SetActive(true);
+                    tennisBallRoot.transform.position = new Vector3(0.16f, 1.22f, -2.25f);
+                }
+                if (ballObj != null)
+                {
+                    ballObj.SetActive(true);
+                    ballObj.transform.localPosition = Vector3.zero;
+                    var bScript = ballObj.GetComponentInParent<Ball>();
+                    if (bScript != null)
+                    {
+                        bScript.SpawnHitImpactEffect(tennisBallRoot.transform.position, false);
+                    }
+                }
+                break;
+        }
     }
 
     private static void DeleteObsoletePCAssets()
@@ -211,6 +721,7 @@ public class SetupMenuAndVRIndependence
         if (uiModule == null) return;
 
         if (mainCam != null) uiModule.uiCamera = mainCam;
+        uiModule.activeInputMode = XRUIInputModule.ActiveInputMode.Both;
         uiModule.enableXRInput = true;
         uiModule.enableMouseInput = true;
         uiModule.enableBuiltinActionsAsFallback = true;
@@ -267,13 +778,48 @@ public class SetupMenuAndVRIndependence
             }
         }
 
+        // Move tennis_ball out of the camera/menu sightline in Edit mode
+        GameObject tennisBallRoot = allGos.FirstOrDefault(g => g.name == "tennis_ball");
+        if (tennisBallRoot != null)
+        {
+            tennisBallRoot.transform.position = new Vector3(0f, 0.25f, -13.8f);
+            Transform ballChild = tennisBallRoot.transform.Find("ball2");
+            if (ballChild != null) ballChild.localPosition = Vector3.zero;
+            EditorUtility.SetDirty(tennisBallRoot);
+        }
+
+        GameObject servePointGo = allGos.FirstOrDefault(g => g.name == "ServePoint");
+        if (servePointGo != null)
+        {
+            servePointGo.transform.position = new Vector3(0.29f, 1.18f, -2.65f);
+            EditorUtility.SetDirty(servePointGo);
+        }
+
+        // Disable default XRI Locomotion/Move so thumbstick doesn't walk away during UI selection
+        if (xrOriginGo != null)
+        {
+            Transform locoMove = xrOriginGo.transform.Find("Locomotion/Move");
+            if (locoMove != null)
+            {
+                locoMove.gameObject.SetActive(false);
+                EditorUtility.SetDirty(locoMove.gameObject);
+            }
+        }
+
         GameObject courtGo = allGos.FirstOrDefault(g => g.name.Contains("Tennis_Court"));
         if (courtGo != null)
         {
             courtGo.tag = "Court";
             foreach (Transform t in courtGo.GetComponentsInChildren<Transform>(true))
             {
-                t.gameObject.tag = "Court";
+                if (t.name == "pCube4" || t.name == "pCube5")
+                {
+                    t.gameObject.tag = "Net";
+                }
+                else
+                {
+                    t.gameObject.tag = "Court";
+                }
             }
             EditorUtility.SetDirty(courtGo);
         }
@@ -284,10 +830,52 @@ public class SetupMenuAndVRIndependence
             vrPlayer.rigTransform = xrOriginGo.transform;
             vrPlayer.animator = vrPlayer.GetComponent<Animator>();
 
+            var moveCtrl = AssetDatabase.LoadAssetAtPath<RuntimeAnimatorController>("Assets/move.controller");
+            if (vrPlayer.animator != null && moveCtrl != null)
+            {
+                vrPlayer.animator.runtimeAnimatorController = moveCtrl;
+                EditorUtility.SetDirty(vrPlayer.animator);
+            }
+
             Transform leftCtrl = xrOriginGo.transform.Find("Camera Offset/Left Controller");
             Transform rightCtrl = xrOriginGo.transform.Find("Camera Offset/Right Controller");
-            if (leftCtrl != null) vrPlayer.vrLeftHand = leftCtrl;
-            if (rightCtrl != null) vrPlayer.vrRightHand = rightCtrl;
+            if (leftCtrl != null)
+            {
+                vrPlayer.vrLeftHand = leftCtrl;
+                leftCtrl.localPosition = new Vector3(-0.25f, 1.05f, 0.45f);
+                leftCtrl.localRotation = Quaternion.identity;
+                EditorUtility.SetDirty(leftCtrl);
+            }
+            if (rightCtrl != null)
+            {
+                vrPlayer.vrRightHand = rightCtrl;
+                rightCtrl.localPosition = new Vector3(0.25f, 1.05f, 0.45f);
+                rightCtrl.localRotation = Quaternion.identity;
+                EditorUtility.SetDirty(rightCtrl);
+            }
+
+            // Disable broken Default-Line LineVisuals and missing controller visual prefabs so they don't render giant triangles in view
+            foreach (Transform t in xrOriginGo.GetComponentsInChildren<Transform>(true))
+            {
+                if (t.name == "LineVisual")
+                {
+                    var lr = t.GetComponent<LineRenderer>();
+                    if (lr != null)
+                    {
+                        lr.startWidth = 0.004f;
+                        lr.endWidth = 0.004f;
+                        lr.widthCurve = AnimationCurve.Constant(0f, 1f, 0.004f);
+                        EditorUtility.SetDirty(lr);
+                    }
+                    t.gameObject.SetActive(false);
+                    EditorUtility.SetDirty(t.gameObject);
+                }
+                else if (t.name.Contains("Missing Prefab"))
+                {
+                    t.gameObject.SetActive(false);
+                    EditorUtility.SetDirty(t.gameObject);
+                }
+            }
 
             // Ordered to match 0.png (Orange), 1.png (Blue), 2.png (Lightgreen), 3.png (Pink)
             string[] orderedRacketNames = { "Tennis_Racket", "Tennis_Racket_Blue", "Tennis_Racket_Lightgreen", "Tennis_Racket_Pink" };
@@ -306,7 +894,8 @@ public class SetupMenuAndVRIndependence
                         // Must be trigger so Right Controller UI raycast passes through unobstructed!
                         col.isTrigger = true;
                     }
-                    rGo.SetActive(orderedRackets.Count == 0);
+                    // Keep hidden in Edit Mode / Main Menu so it doesn't float in the sky; GameManager activates the selected racket on GameStart!
+                    rGo.SetActive(false);
                     orderedRackets.Add(rGo);
                     EditorUtility.SetDirty(rGo);
                 }
@@ -355,35 +944,37 @@ public class SetupMenuAndVRIndependence
         canvasObj.AddComponent<TrackedDeviceGraphicRaycaster>();
         canvasObj.AddComponent<SelectionUIHandler>();
 
-        // Position directly in front of VR Player at (-0.06, 1.48, -3.65) facing player (rotation 0, 180, 0)
-        canvasRT.sizeDelta = new Vector2(1040, 700);
-        canvasRT.position = new Vector3(-0.06f, 1.48f, -3.65f);
+        // Position directly in front of VR Player at (-0.06, 1.48, -3.05) facing player (rotation 0, 180, 0)
+        canvasRT.sizeDelta = new Vector2(1920, 1080);
+        canvasRT.position = new Vector3(-0.06f, 1.48f, -3.05f);
         canvasRT.rotation = Quaternion.Euler(0f, 180f, 0f);
-        canvasRT.localScale = new Vector3(0.002f, 0.002f, 0.002f);
+        canvasRT.localScale = new Vector3(0.0016f, 0.0016f, 0.0016f);
 
-        // ==================== PANEL 1: VR MAIN MENU (START SCREEN) ====================
-        mainMenuPanel = CreatePanel("VR_MainMenuPanel", canvasObj.transform, new Color(0.05f, 0.08f, 0.14f, 0.95f));
-        CreateBorderOutline(mainMenuPanel.transform, new Color(0.2f, 0.85f, 0.55f, 0.8f));
-
+        // ==================== PANEL 1: VR MAIN MENU (FULL-SCREEN START TITLE) ====================
+        mainMenuPanel = CreateUIObject("VR_MainMenuPanel", canvasObj.transform);
+        SetRectFull(mainMenuPanel, 0f);
+        Image mainBgImg = mainMenuPanel.AddComponent<Image>();
         if (titleSprite != null)
         {
-            GameObject bannerGo = CreateUIObject("BannerImage", mainMenuPanel.transform);
-            SetRect(bannerGo, new Vector2(0.5f, 0.5f), new Vector2(0, 175), new Vector2(640, 250));
-            Image bImg = bannerGo.AddComponent<Image>();
-            bImg.sprite = titleSprite;
-            bImg.preserveAspect = true;
-            bImg.raycastTarget = false;
+            mainBgImg.sprite = titleSprite;
+            mainBgImg.color = Color.white;
+            mainBgImg.preserveAspect = false; // Fills the entire start screen with the title artwork
+        }
+        else
+        {
+            mainBgImg.color = new Color(0.05f, 0.08f, 0.14f, 1f);
         }
 
-        CreateLabel("MainTitle", mainMenuPanel.transform, font, "VR TENNIS CHAMPIONSHIP", 44, FontStyles.Bold, new Color(0.95f, 1f, 0.98f), new Vector2(0, 15), new Vector2(900, 60));
-        CreateLabel("SubTitle", mainMenuPanel.transform, font, "Aim with VR Controller Laser & Pull Trigger to Select", 22, FontStyles.Normal, new Color(0.65f, 0.85f, 1f), new Vector2(0, -30), new Vector2(850, 40));
-
-        CreateStyledButton("StartGameBtn", mainMenuPanel.transform, font, "START GAME", 32, new Vector2(0, -110), new Vector2(460, 74), new Color(0.12f, 0.68f, 0.38f, 1f));
-        CreateStyledButton("OpenSettingsBtn", mainMenuPanel.transform, font, "SETTINGS & CONTROLS", 28, new Vector2(0, -200), new Vector2(460, 68), new Color(0.18f, 0.45f, 0.78f, 1f));
-        CreateStyledButton("QuitBtn", mainMenuPanel.transform, font, "EXIT GAME", 26, new Vector2(0, -285), new Vector2(460, 62), new Color(0.68f, 0.22f, 0.25f, 1f));
+        // Action buttons positioned cleanly on the lower half of the title screen
+        CreateStyledButton("StartGameBtn", mainMenuPanel.transform, font, "START GAME", 34, new Vector2(0, -180), new Vector2(500, 84), new Color(0.12f, 0.74f, 0.38f, 1f));
+        CreateStyledButton("OpenSettingsBtn", mainMenuPanel.transform, font, "SETTINGS & CONTROLS", 28, new Vector2(0, -280), new Vector2(500, 74), new Color(0.18f, 0.46f, 0.80f, 1f));
+        CreateStyledButton("QuitBtn", mainMenuPanel.transform, font, "EXIT GAME", 26, new Vector2(0, -375), new Vector2(500, 68), new Color(0.70f, 0.22f, 0.25f, 1f));
 
         // ==================== PANEL 2: VR SETTINGS & CONTROLS ====================
-        settingsPanel = CreatePanel("VR_SettingsPanel", canvasObj.transform, new Color(0.05f, 0.08f, 0.14f, 0.96f));
+        settingsPanel = CreateUIObject("VR_SettingsPanel", canvasObj.transform);
+        SetRect(settingsPanel, new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1060, 720));
+        Image setBg = settingsPanel.AddComponent<Image>();
+        setBg.color = new Color(0.05f, 0.08f, 0.14f, 0.96f);
         CreateBorderOutline(settingsPanel.transform, new Color(0.3f, 0.7f, 1f, 0.8f));
         settingsPanel.SetActive(false);
 
@@ -439,24 +1030,27 @@ public class SetupMenuAndVRIndependence
         CreateStyledButton("CloseSettingsBtn", settingsPanel.transform, font, "BACK", 28, new Vector2(0, -265), new Vector2(340, 68), new Color(0.55f, 0.25f, 0.28f, 1f));
 
         // ==================== PANEL 3: CHARACTER & RACKET SELECTION ====================
-        selectionPanel = CreatePanel("vrSelectionUI", canvasObj.transform, new Color(0.05f, 0.08f, 0.14f, 0.96f));
+        selectionPanel = CreateUIObject("vrSelectionUI", canvasObj.transform);
+        SetRect(selectionPanel, new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(1100, 750));
+        Image selBg = selectionPanel.AddComponent<Image>();
+        selBg.color = new Color(0.05f, 0.08f, 0.14f, 0.96f);
         CreateBorderOutline(selectionPanel.transform, new Color(0.25f, 0.95f, 0.6f, 0.85f));
         selectionPanel.SetActive(false);
 
-        CreateLabel("SelectionTitle", selectionPanel.transform, font, "SELECT CHARACTER & RACKET", 38, FontStyles.Bold, Color.white, new Vector2(0, 290), new Vector2(920, 50));
-        CreateLabel("SelectionHint", selectionPanel.transform, font, "Click [<] [>] with VR Controller Trigger or Flick Thumbstick Left/Right", 20, FontStyles.Normal, new Color(0.65f, 0.9f, 1f), new Vector2(0, 245), new Vector2(920, 32));
+        CreateLabel("SelectionTitle", selectionPanel.transform, font, "SELECT OPPONENT & RACKET", 38, FontStyles.Bold, Color.white, new Vector2(0, 310), new Vector2(920, 50));
+        CreateLabel("SelectionHint", selectionPanel.transform, font, "Aim with VR Controller Laser & Pull Trigger to Select", 20, FontStyles.Normal, new Color(0.65f, 0.9f, 1f), new Vector2(0, 265), new Vector2(920, 32));
 
-        // Left Card: Character Selection
+        // Left Card: Opponent Character Selection
         GameObject charCard = CreateUIObject("CharacterCard", selectionPanel.transform);
-        SetRect(charCard, new Vector2(0.5f, 0.5f), new Vector2(-245, 5), new Vector2(450, 410));
+        SetRect(charCard, new Vector2(0.5f, 0.5f), new Vector2(-255, 15), new Vector2(460, 430));
         charCard.AddComponent<Image>().color = new Color(0.09f, 0.14f, 0.22f, 0.95f);
 
-        CreateLabel("CharLabel", charCard.transform, font, "CHARACTER", 26, FontStyles.Bold, new Color(0.4f, 1f, 0.75f), new Vector2(0, 165), new Vector2(380, 40));
-        CreateStyledButton("CharPrevBtn", charCard.transform, font, "<", 38, new Vector2(-165, 15), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
-        CreateStyledButton("CharNextBtn", charCard.transform, font, ">", 38, new Vector2(165, 15), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
+        CreateLabel("CharLabel", charCard.transform, font, "OPPONENT CHARACTER", 24, FontStyles.Bold, new Color(0.4f, 1f, 0.75f), new Vector2(0, 175), new Vector2(400, 40));
+        CreateStyledButton("CharPrevBtn", charCard.transform, font, "<", 38, new Vector2(-170, 20), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
+        CreateStyledButton("CharNextBtn", charCard.transform, font, ">", 38, new Vector2(170, 20), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
 
         GameObject charBorder = CreateUIObject("CharImage_Border", charCard.transform);
-        SetRect(charBorder, new Vector2(0.5f, 0.5f), new Vector2(0, 15), new Vector2(220, 220));
+        SetRect(charBorder, new Vector2(0.5f, 0.5f), new Vector2(0, 20), new Vector2(220, 220));
         charBorder.AddComponent<Image>().color = new Color(0.15f, 0.22f, 0.32f, 1f);
 
         GameObject charImgGo = CreateUIObject("CharImage", charBorder.transform);
@@ -466,19 +1060,19 @@ public class SetupMenuAndVRIndependence
         charImg.preserveAspect = true;
         charImg.raycastTarget = false;
 
-        charNameTxt = CreateLabel("CharNameText", charCard.transform, font, "EMERALD HEROINE\n<size=20><color=#80FFAA>[BALANCED] SPD **  PWR **</color></size>", 23, FontStyles.Bold, Color.white, new Vector2(0, -145), new Vector2(420, 75));
+        charNameTxt = CreateLabel("CharNameText", charCard.transform, font, "EMERALD HEROINE\n<size=20><color=#80FFAA>[BALANCED] SPD **  PWR **</color></size>", 23, FontStyles.Bold, Color.white, new Vector2(0, -145), new Vector2(430, 75));
 
-        // Right Card: Racket Selection
+        // Right Card: Tennis Racket Selection
         GameObject racketCard = CreateUIObject("RacketCard", selectionPanel.transform);
-        SetRect(racketCard, new Vector2(0.5f, 0.5f), new Vector2(245, 5), new Vector2(450, 410));
+        SetRect(racketCard, new Vector2(0.5f, 0.5f), new Vector2(255, 15), new Vector2(460, 430));
         racketCard.AddComponent<Image>().color = new Color(0.09f, 0.14f, 0.22f, 0.95f);
 
-        CreateLabel("RacketLabel", racketCard.transform, font, "TENNIS RACKET", 26, FontStyles.Bold, new Color(1f, 0.85f, 0.4f), new Vector2(0, 165), new Vector2(380, 40));
-        CreateStyledButton("RacketPrevBtn", racketCard.transform, font, "<", 38, new Vector2(-165, 15), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
-        CreateStyledButton("RacketNextBtn", racketCard.transform, font, ">", 38, new Vector2(165, 15), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
+        CreateLabel("RacketLabel", racketCard.transform, font, "TENNIS RACKET", 24, FontStyles.Bold, new Color(1f, 0.85f, 0.4f), new Vector2(0, 175), new Vector2(400, 40));
+        CreateStyledButton("RacketPrevBtn", racketCard.transform, font, "<", 38, new Vector2(-170, 20), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
+        CreateStyledButton("RacketNextBtn", racketCard.transform, font, ">", 38, new Vector2(170, 20), new Vector2(76, 130), new Color(0.18f, 0.38f, 0.62f, 1f));
 
         GameObject racketBorder = CreateUIObject("RacketImage_Border", racketCard.transform);
-        SetRect(racketBorder, new Vector2(0.5f, 0.5f), new Vector2(0, 15), new Vector2(220, 220));
+        SetRect(racketBorder, new Vector2(0.5f, 0.5f), new Vector2(0, 20), new Vector2(220, 220));
         racketBorder.AddComponent<Image>().color = new Color(0.15f, 0.22f, 0.32f, 1f);
 
         GameObject racketImgGo = CreateUIObject("RacketImage", racketBorder.transform);
@@ -488,11 +1082,11 @@ public class SetupMenuAndVRIndependence
         racketImg.preserveAspect = true;
         racketImg.raycastTarget = false;
 
-        racketNameTxt = CreateLabel("RacketNameText", racketCard.transform, font, "CLASSIC ORANGE\n<size=20><color=#FFD180>Standard Balanced Racket</color></size>", 23, FontStyles.Bold, Color.white, new Vector2(0, -145), new Vector2(420, 75));
+        racketNameTxt = CreateLabel("RacketNameText", racketCard.transform, font, "CLASSIC ORANGE\n<size=20><color=#FFD180>Standard Balanced Racket</color></size>", 23, FontStyles.Bold, Color.white, new Vector2(0, -145), new Vector2(430, 75));
 
         // Bottom Buttons: Back & Start Match
-        CreateStyledButton("BackToMainBtn", selectionPanel.transform, font, "BACK TO MENU", 26, new Vector2(-210, -265), new Vector2(320, 72), new Color(0.48f, 0.22f, 0.25f, 1f));
-        CreateStyledButton("VRPlayBtn", selectionPanel.transform, font, "START MATCH!", 32, new Vector2(190, -265), new Vector2(420, 72), new Color(0.12f, 0.72f, 0.38f, 1f));
+        CreateStyledButton("BackToMainBtn", selectionPanel.transform, font, "BACK TO MENU", 26, new Vector2(-210, -285), new Vector2(320, 72), new Color(0.48f, 0.22f, 0.25f, 1f));
+        CreateStyledButton("VRPlayBtn", selectionPanel.transform, font, "START MATCH!", 32, new Vector2(210, -285), new Vector2(420, 72), new Color(0.12f, 0.72f, 0.38f, 1f));
 
         EditorUtility.SetDirty(canvasObj);
         return canvasObj;
@@ -553,34 +1147,92 @@ public class SetupMenuAndVRIndependence
 
         if (scoreGo == null) return;
 
+        RectTransform scoreRT = scoreGo.GetComponent<RectTransform>();
+        if (scoreRT != null)
+        {
+            scoreRT.sizeDelta = new Vector2(960, 640);
+            scoreRT.localPosition = new Vector3(0f, 1.52f, 2.35f);
+            scoreRT.localRotation = Quaternion.identity;
+            scoreRT.localScale = new Vector3(0.0022f, 0.0022f, 0.0022f);
+        }
+
         Canvas c = scoreGo.GetComponent<Canvas>();
         if (c != null)
         {
             c.renderMode = RenderMode.WorldSpace;
             c.worldCamera = mainCam;
+            c.sortingOrder = 15;
         }
         if (scoreGo.GetComponent<GraphicRaycaster>() == null) scoreGo.AddComponent<GraphicRaycaster>();
         if (scoreGo.GetComponent<TrackedDeviceGraphicRaycaster>() == null) scoreGo.AddComponent<TrackedDeviceGraphicRaycaster>();
 
-        vrScoreTxt = scoreGo.transform.Find("Tennis_Scoreboard_Root/PlayerScore")?.GetComponent<TextMeshProUGUI>();
-        vrEnemyScoreTxt = scoreGo.transform.Find("Tennis_Scoreboard_Root/EnemyScore")?.GetComponent<TextMeshProUGUI>();
-        vrGameScoreTxt = scoreGo.transform.Find("Tennis_Scoreboard_Root/GameScore")?.GetComponent<TextMeshProUGUI>();
+        Transform oldScoreRoot = scoreGo.transform.Find("Tennis_Scoreboard_Root");
+        if (oldScoreRoot != null) Object.DestroyImmediate(oldScoreRoot.gameObject);
+
+        GameObject scoreRoot = CreateUIObject("Tennis_Scoreboard_Root", scoreGo.transform);
+        SetRect(scoreRoot, new Vector2(0.5f, 0.5f), new Vector2(0, 265), new Vector2(860, 82));
+        Image sbBg = scoreRoot.AddComponent<Image>();
+        sbBg.color = new Color(0.04f, 0.08f, 0.14f, 0.88f);
+        sbBg.raycastTarget = false;
+        CreateBorderOutline(scoreRoot.transform, new Color(0.25f, 0.85f, 0.6f, 0.7f));
+
+        vrScoreTxt = CreateLabel("PlayerScore", scoreRoot.transform, font, "PLAYER: 0", 30, FontStyles.Bold, new Color(0.45f, 1f, 0.75f), new Vector2(-265, 0), new Vector2(280, 65));
+        vrGameScoreTxt = CreateLabel("GameScore", scoreRoot.transform, font, "SET  0 : 0", 32, FontStyles.Bold, Color.yellow, new Vector2(0, 0), new Vector2(240, 65));
+        vrEnemyScoreTxt = CreateLabel("EnemyScore", scoreRoot.transform, font, "AI: 0", 30, FontStyles.Bold, new Color(1f, 0.55f, 0.55f), new Vector2(265, 0), new Vector2(280, 65));
 
         Transform oldVic = scoreGo.transform.Find("VictoryPanel");
         if (oldVic != null) Object.DestroyImmediate(oldVic.gameObject);
         Transform oldLose = scoreGo.transform.Find("LosePanel");
         if (oldLose != null) Object.DestroyImmediate(oldLose.gameObject);
 
+        // Build In-Game Rally Gauge Bar (Bottom-Right HUD)
+        Transform oldGauge = scoreGo.transform.Find("RallyGauge_Root");
+        if (oldGauge != null) Object.DestroyImmediate(oldGauge.gameObject);
+
+        GameObject gaugeRoot = CreateUIObject("RallyGauge_Root", scoreGo.transform);
+        SetRect(gaugeRoot, new Vector2(0.5f, 0.5f), new Vector2(285, -235), new Vector2(340, 68));
+        Image gBg = gaugeRoot.AddComponent<Image>();
+        gBg.color = new Color(0.04f, 0.08f, 0.14f, 0.92f);
+        gBg.raycastTarget = false;
+        CreateBorderOutline(gaugeRoot.transform, new Color(0.2f, 0.9f, 1f, 0.85f));
+
+        var gaugeLabel = CreateLabel("GaugeLabel", gaugeRoot.transform, font, "RALLY GAUGE  0%", 20, FontStyles.Bold, new Color(0.4f, 1f, 0.85f), new Vector2(0, 15), new Vector2(310, 28));
+
+        GameObject barSlot = CreateUIObject("BarSlot", gaugeRoot.transform);
+        SetRect(barSlot, new Vector2(0.5f, 0.5f), new Vector2(0, -14), new Vector2(300, 20));
+        Image slotImg = barSlot.AddComponent<Image>();
+        slotImg.color = new Color(0.08f, 0.14f, 0.22f, 1f);
+        slotImg.raycastTarget = false;
+
+        GameObject barFill = CreateUIObject("BarFill", barSlot.transform);
+        SetRectFull(barFill, 2f);
+        Image fillImg = barFill.AddComponent<Image>();
+        fillImg.color = new Color(0.2f, 0.95f, 1f, 1f);
+        fillImg.type = Image.Type.Filled;
+        fillImg.fillMethod = Image.FillMethod.Horizontal;
+        fillImg.fillAmount = 0f;
+        fillImg.raycastTarget = false;
+
+        VRPlayerController vrPlayer = Resources.FindObjectsOfTypeAll<VRPlayerController>().FirstOrDefault(p => p != null && p.gameObject.scene == scoreGo.scene);
+        if (vrPlayer != null)
+        {
+            vrPlayer.rallyGaugeFill = fillImg;
+            vrPlayer.rallyGaugeText = gaugeLabel;
+            vrPlayer.rallyGaugeRoot = gaugeRoot.GetComponent<RectTransform>();
+            EditorUtility.SetDirty(vrPlayer);
+        }
+
         victoryPanel = BuildGameOverPanel("VictoryPanel", scoreGo.transform, font, "VICTORY!", new Color(1f, 0.88f, 0.25f));
         losePanel = BuildGameOverPanel("LosePanel", scoreGo.transform, font, "DEFEAT...", new Color(1f, 0.35f, 0.35f));
 
+        scoreGo.SetActive(false);
         EditorUtility.SetDirty(scoreGo);
     }
 
     private static GameObject BuildGameOverPanel(string name, Transform parent, TMP_FontAsset font, string title, Color titleColor)
     {
         GameObject panel = CreateUIObject(name, parent);
-        SetRect(panel, new Vector2(0.5f, 0.5f), Vector2.zero, new Vector2(650, 420));
+        SetRect(panel, new Vector2(0.5f, 0.5f), new Vector2(0, -15), new Vector2(650, 420));
         panel.AddComponent<Image>().color = new Color(0.05f, 0.08f, 0.14f, 0.95f);
         CreateBorderOutline(panel.transform, titleColor);
 
@@ -685,5 +1337,88 @@ public class SetupMenuAndVRIndependence
         tmp.raycastTarget = false;
 
         return btn;
+    }
+
+    // ==================== Gameplay Test Menu Items ====================
+    [MenuItem("Tools/Capstone/Toggle Play Mode")]
+    public static void TogglePlayMode()
+    {
+        EditorApplication.isPlaying = !EditorApplication.isPlaying;
+    }
+
+    [MenuItem("Tools/Capstone/Test/Serve Toss")]
+    public static void TestServeToss()
+    {
+        var vr = Object.FindFirstObjectByType<VRPlayerController>();
+        if (vr != null) vr.TossBall();
+    }
+
+    [MenuItem("Tools/Capstone/Test/Player Hit Ball")]
+    public static void TestPlayerHitBall()
+    {
+        var vr = Object.FindFirstObjectByType<VRPlayerController>();
+        if (vr != null) vr.ApplyHitVelocity();
+    }
+
+    [MenuItem("Tools/Capstone/Test/AI Hit Ball")]
+    public static void TestAIHitBall()
+    {
+        var enemy = Object.FindFirstObjectByType<EnemyAI>();
+        if (enemy != null)
+        {
+            var mi = typeof(EnemyAI).GetMethod("EnemyHit", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Public);
+            if (mi != null) mi.Invoke(enemy, null);
+        }
+    }
+
+    [MenuItem("Tools/Capstone/Test/Score Point Player")]
+    public static void TestScorePointPlayer()
+    {
+        if (GameManager.Instance != null && GameManager.Instance.enemyBackTrigger != null)
+        {
+            GameManager.Instance.NotifyBallOut(GameManager.Instance.enemyBackTrigger);
+        }
+    }
+
+    [MenuItem("Tools/Capstone/Test/Score Point AI")]
+    public static void TestScorePointAI()
+    {
+        if (GameManager.Instance != null && GameManager.Instance.playerBackTrigger != null)
+        {
+            GameManager.Instance.NotifyBallOut(GameManager.Instance.playerBackTrigger);
+        }
+    }
+
+    [MenuItem("Tools/Capstone/Test/Show Victory Screen")]
+    public static void TestVictoryScreen()
+    {
+        if (GameManager.Instance != null)
+        {
+            if (GameManager.Instance.victoryPanel != null)
+                GameManager.Instance.victoryPanel.SetActive(true);
+            if (GameManager.Instance.vrCanvas != null)
+                GameManager.Instance.vrCanvas.SetActive(true);
+        }
+    }
+
+    [MenuItem("Tools/Capstone/Test/Show Defeat Screen")]
+    public static void TestDefeatScreen()
+    {
+        if (GameManager.Instance != null)
+        {
+            if (GameManager.Instance.losePanel != null)
+                GameManager.Instance.losePanel.SetActive(true);
+            if (GameManager.Instance.vrCanvas != null)
+                GameManager.Instance.vrCanvas.SetActive(true);
+        }
+    }
+
+    [MenuItem("Tools/Capstone/Test/Pause Game")]
+    public static void TestPauseGame()
+    {
+        if (GameManager.Instance != null)
+        {
+            GameManager.Instance.PauseGame();
+        }
     }
 }

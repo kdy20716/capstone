@@ -1,6 +1,12 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { Sky } from 'three/addons/objects/Sky.js';
 import {
   createNintendoGrassTexture,
   createResortWaterTexture,
@@ -91,7 +97,7 @@ class TennisIslandCinematicViewer {
     this.scene.add(this.islandGroup);
 
     // 닌텐도 스위치 스포츠 감성의 청량하고 부드러운 파스텔 원경 안개
-    this.scene.fog = new THREE.Fog(0xbde8ff, 450, 2400);
+    this.scene.fog = new THREE.Fog(0x9bdcff, 600, 4200);
 
     const width = window.innerWidth;
     const height = window.innerHeight;
@@ -110,6 +116,71 @@ class TennisIslandCinematicViewer {
 
     this.container.innerHTML = '';
     this.container.appendChild(this.renderer.domElement);
+
+    // [그래픽 업그레이드] 텍스처 sRGB 색공간 보정 + 이방성 필터링
+    const maxAniso = this.renderer.capabilities.getMaxAnisotropy();
+    const rawLoad = this.textureLoader.load.bind(this.textureLoader);
+    this.textureLoader.load = (url, onLoad, onProgress, onError) => {
+      const tex = rawLoad(url, onLoad, onProgress, onError);
+      if (!/normal/i.test(String(url))) tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = maxAniso;
+      return tex;
+    };
+
+    // [그래픽 업그레이드] 후처리: MSAA 4x + HDR 블룸 + 톤매핑/sRGB 출력
+    const rt = new THREE.WebGLRenderTarget(width, height, {
+      type: THREE.HalfFloatType,
+      samples: 4
+    });
+    this.composer = new EffectComposer(this.renderer, rt);
+    this.composer.setPixelRatio(this.renderer.getPixelRatio());
+    this.composer.setSize(width, height);
+    this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.bloomPass = new UnrealBloomPass(new THREE.Vector2(width, height), 0.3, 0.7, 1.0);
+    this.composer.addPass(this.bloomPass);
+
+    // [그래픽 업그레이드] 시간대별 컬러 그레이딩 (섀도 틴트 / 채도 / 대비 / 비네트)
+    this.gradePass = new ShaderPass({
+      uniforms: {
+        tDiffuse: { value: null },
+        tint: { value: new THREE.Vector3(1, 1, 1) },
+        shadowTint: { value: new THREE.Vector3(0, 0, 0) },
+        sat: { value: 1.0 },
+        contrast: { value: 1.0 },
+        vignette: { value: 0.0 }
+      },
+      vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+      fragmentShader: `
+        uniform sampler2D tDiffuse;
+        uniform vec3 tint;
+        uniform vec3 shadowTint;
+        uniform float sat;
+        uniform float contrast;
+        uniform float vignette;
+        varying vec2 vUv;
+        void main() {
+          vec3 c = texture2D(tDiffuse, vUv).rgb;
+          float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
+          c = mix(vec3(l), c, sat);
+          c += shadowTint * (1.0 - smoothstep(0.0, 0.7, l));
+          c *= tint;
+          c = max((c - 0.18) * contrast + 0.18, 0.0);
+          float d = length(vUv - 0.5);
+          c *= 1.0 - vignette * smoothstep(0.30, 0.85, d);
+          gl_FragColor = vec4(c, 1.0);
+        }`
+    });
+    this.composer.addPass(this.gradePass);
+    this.gradeTargets = {
+      day:    { tint: [1.0, 1.0, 1.0],    shadow: [0, 0, 0],          sat: 1.0,  contrast: 1.0,  vig: 0.0 },
+      sunset: { tint: [1.0, 1.0, 1.0],    shadow: [0, 0, 0],          sat: 1.0,  contrast: 1.0,  vig: 0.0 },
+      night:  { tint: [0.92, 1.02, 1.14], shadow: [0.0, 0.02, 0.06],  sat: 1.08, contrast: 1.08, vig: 0.42 }
+    };
+    this.composer.addPass(new OutputPass());
+
+    // 시간대별 블룸 세기 (낮은 은은하게, 밤은 조명/폭죽이 화사하게)
+    this.bloomTargets = { day: 0.28, sunset: 0.45, night: 0.95 };
+    this.bloomThresholds = { day: 1.0, sunset: 1.0, night: 1.0 };
   }
 
   /* 닌텐도 스위치 스포츠 감성 + 골든 아워 샴페인 틴트 시네마틱 스카이 */
@@ -133,11 +204,44 @@ class TennisIslandCinematicViewer {
     this.skyCanvas = canvas;
     this.skyCtx = ctx;
     this.skyTexture = new THREE.CanvasTexture(canvas);
-    this.scene.background = this.skyTexture;
+    // [그래픽 업그레이드] 대기 산란(Preetham) 기반 절차적 하늘 + 별밭
+    this.scene.background = null;
+    this.sky = new Sky();
+    this.sky.scale.setScalar(4200);
+    this.scene.add(this.sky);
+
+    // 반사/IBL용 환경맵(PMREM): 동일 파라미터의 별도 Sky를 캡처
+    this.pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.skyEnvScene = new THREE.Scene();
+    this.skyEnv = new Sky();
+    this.skyEnv.scale.setScalar(4200);
+    this.skyEnvScene.add(this.skyEnv);
+    this.envRT = null;
+    this.sunDir = new THREE.Vector3();
+
+    // 밤하늘 별
+    const starCount = 3500;
+    const starPos = new Float32Array(starCount * 3);
+    for (let i = 0; i < starCount; i++) {
+      const u = Math.random(), v = Math.random() * 0.92 + 0.04;
+      const th = u * Math.PI * 2, ph = Math.acos(v);
+      const r = 3600;
+      starPos[i * 3] = r * Math.sin(ph) * Math.cos(th);
+      starPos[i * 3 + 1] = r * Math.cos(ph);
+      starPos[i * 3 + 2] = r * Math.sin(ph) * Math.sin(th);
+    }
+    const starGeo = new THREE.BufferGeometry();
+    starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+    this.starMat = new THREE.PointsMaterial({
+      color: 0xffffff, size: 2.6, sizeAttenuation: false,
+      transparent: true, opacity: 0, depthWrite: false, fog: false
+    });
+    this.stars = new THREE.Points(starGeo, this.starMat);
+    this.scene.add(this.stars);
 
     // 푹신푹신한 볼륨감의 닌텐도 카툰 솜사탕 구름 클러스터
     this.cloudsGroup = new THREE.Group();
-    const cloudCount = 22;
+    const cloudCount = 0; // 인공적인 로우폴리 구름 제거
 
     for (let i = 0; i < cloudCount; i++) {
       const cloud = createStylizedCloud();
@@ -157,19 +261,102 @@ class TennisIslandCinematicViewer {
     this.scene.add(this.cloudsGroup);
   }
 
+  /* [그래픽 업그레이드] 하늘 환경맵을 바다/섬/경기장 재질에 은은한 반사광으로 적용 */
+  applyEnvironmentDetail() {
+    if (!this.envRT) return;
+    const env = this.envRT.texture;
+    if (this.waterMesh) {
+      this.waterMesh.material.envMap = env;
+      this.waterMesh.material.envMapIntensity = this.currentTod === 'day' ? 0.1 : 0.3;
+      this.waterMesh.material.needsUpdate = true;
+    }
+    this.islandGroup.traverse((o) => {
+      if (!o.isMesh || !o.material) return;
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      mats.forEach((m) => {
+        if (m.isMeshStandardMaterial || m.isMeshPhysicalMaterial) {
+          m.envMap = env;
+          m.envMapIntensity = 0.35;
+          m.needsUpdate = true;
+        } else if (m.isMeshPhongMaterial || m.isMeshLambertMaterial) {
+          if (m.isMeshPhongMaterial) {
+            m.envMap = env;
+            m.reflectivity = 0.06;
+            m.needsUpdate = true;
+          }
+        }
+      });
+    });
+  }
+
+  /* 타일링되는 절차적 물결 노말맵 생성 */
+  createWaterNormalMap() {
+    const N = 256;
+    const h = new Float32Array(N * N);
+    const waves = [
+      [3, 2, 1.0, 0.0], [5, 7, 0.6, 1.3], [9, 4, 0.35, 2.1],
+      [12, 11, 0.2, 0.7], [2, 9, 0.5, 3.4], [17, 6, 0.12, 4.2]
+    ];
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        let v = 0;
+        for (const [fx, fy, a, p] of waves) {
+          v += a * Math.sin((x / N) * Math.PI * 2 * fx + (y / N) * Math.PI * 2 * fy + p);
+        }
+        h[y * N + x] = v;
+      }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = N;
+    canvas.height = N;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(N, N);
+    const k = 6.0;
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const dx = h[y * N + ((x + 1) % N)] - h[y * N + ((x - 1 + N) % N)];
+        const dy = h[((y + 1) % N) * N + x] - h[((y - 1 + N) % N) * N + x];
+        let nx = -dx * k / N * 10, ny = -dy * k / N * 10, nz = 1;
+        const len = Math.hypot(nx, ny, nz);
+        nx /= len; ny /= len; nz /= len;
+        const i = (y * N + x) * 4;
+        img.data[i] = (nx * 0.5 + 0.5) * 255;
+        img.data[i + 1] = (ny * 0.5 + 0.5) * 255;
+        img.data[i + 2] = (nz * 0.5 + 0.5) * 255;
+        img.data[i + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 8;
+    return tex;
+  }
+
   /* 화사하고 생생한 닌텐도 리조트 메가 아일랜드 & 맑은 바다 & 산호초 군도 */
   initVastOceanAndMegaIsland() {
     // 1. 에메랄드빛 카툰 수면 텍스처 바다
     const oceanGeo = new THREE.PlaneGeometry(10000, 10000, 64, 64);
     const waterTex = createResortWaterTexture();
-    const oceanMat = new THREE.MeshStandardMaterial({
+    // [그래픽 업그레이드] 절차적 노말맵 + 하늘 반사 + 클리어코트의 물리 기반 바다
+    const waterNormal = this.createWaterNormalMap();
+    waterNormal.repeat.copy(waterTex.repeat);
+    waterNormal.repeat.multiplyScalar(2);
+    const oceanMat = new THREE.MeshPhysicalMaterial({
       color: 0x0284c7,
       map: waterTex,
-      roughness: 0.12,
-      metalness: 0.15,
+      normalMap: waterNormal,
+      normalScale: new THREE.Vector2(0.55, 0.55),
+      roughness: 0.1,
+      metalness: 0.0,
+      clearcoat: 0.35,
+      clearcoatRoughness: 0.05,
+      envMapIntensity: 0.3,
       transparent: true,
       opacity: 0.95
     });
+    this.waterNormalMap = waterNormal;
     this.waterMesh = new THREE.Mesh(oceanGeo, oceanMat);
     this.waterMesh.rotation.x = -Math.PI / 2;
     this.waterMesh.position.y = -0.8;
@@ -202,8 +389,10 @@ class TennisIslandCinematicViewer {
     sandTex.repeat.set(32, 32);
     const sandMat = new THREE.MeshStandardMaterial({
       map: sandTex,
-      roughness: 0.9,
-      metalness: 0.04
+      bumpMap: sandTex,
+      bumpScale: 2.2,
+      roughness: 0.92,
+      metalness: 0.0
     });
     const sandMesh = new THREE.Mesh(sandGeo, sandMat);
     sandMesh.rotation.x = -Math.PI / 2;
@@ -218,11 +407,17 @@ class TennisIslandCinematicViewer {
     grassTex.wrapS = THREE.RepeatWrapping;
     grassTex.wrapT = THREE.RepeatWrapping;
     grassTex.repeat.set(22, 22);
+    const grassNormal = this.textureLoader.load('assets/textures/grass_normal.jpg');
+    grassNormal.wrapS = THREE.RepeatWrapping;
+    grassNormal.wrapT = THREE.RepeatWrapping;
+    grassNormal.repeat.set(22, 22);
     const grassMat = new THREE.MeshStandardMaterial({
-      color: 0x3ea82a, // 살짝 더 밝고 산뜻해진 리조트 잔디 그린
+      color: 0x62dc3e, // 쨍한 여름 잔디 그린
       map: grassTex,
-      roughness: 0.76,
-      metalness: 0.02
+      normalMap: grassNormal,
+      normalScale: new THREE.Vector2(0.8, 0.8),
+      roughness: 0.78,
+      metalness: 0.0
     });
     const grassMesh = new THREE.Mesh(grassGeo, grassMat);
     grassMesh.rotation.x = -Math.PI / 2;
@@ -386,8 +581,9 @@ class TennisIslandCinematicViewer {
     const sunLight = new THREE.DirectionalLight(0xfff5e6, 2.9);
     sunLight.position.set(220, 380, 260);
     sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 2048;
-    sunLight.shadow.mapSize.height = 2048;
+    sunLight.shadow.mapSize.width = 4096;
+    sunLight.shadow.mapSize.height = 4096;
+    sunLight.shadow.radius = 2.5;
     sunLight.shadow.camera.near = 50;
     sunLight.shadow.camera.far = 850;
     sunLight.shadow.bias = -0.0006;
@@ -540,6 +736,95 @@ class TennisIslandCinematicViewer {
   }
 
   /* 시간대 (Time of Day) 3단 순환 전환 시스템: day ➔ sunset ➔ night ➔ day */
+  /* =========================================================================
+     시간대 부드러운 전환 (기본 2초)
+     - 최종 값은 기존 _applyTimeOfDay 가 계산하고, 그 직전/직후 값을 스냅샷으로 찍어
+       animate() 에서 from → to 로 보간한다. (하늘/태양/조명/안개/바다/경기장 불빛 등)
+  ========================================================================= */
+  _collectTweenables() {
+    const list = [];
+    const num = (o, p) => { if (o && typeof o[p] === 'number') list.push({ t: 'n', o, p }); };
+    const col = (c) => { if (c && c.isColor) list.push({ t: 'c', c }); };
+    const vec = (v) => { if (v && v.isVector3) list.push({ t: 'v', v }); };
+
+    if (this.sky) {
+      const u = this.sky.material.uniforms;
+      num(u.turbidity, 'value'); num(u.rayleigh, 'value');
+      num(u.mieCoefficient, 'value'); num(u.mieDirectionalG, 'value');
+      vec(u.sunPosition.value);
+    }
+    if (this.renderer) num(this.renderer, 'toneMappingExposure');
+    if (this.starMat) num(this.starMat, 'opacity');
+
+    if (this.hemiLight) { col(this.hemiLight.color); col(this.hemiLight.groundColor); num(this.hemiLight, 'intensity'); }
+    [this.sunLight, this.fillLight].forEach((l) => {
+      if (!l) return;
+      col(l.color); num(l, 'intensity'); vec(l.position);
+    });
+    if (this.scene.fog) col(this.scene.fog.color);
+    if (this.waterMesh) {
+      const m = this.waterMesh.material;
+      col(m.color); num(m, 'roughness'); num(m, 'specularIntensity');
+    }
+
+    const light = (l) => { col(l.color); num(l, 'intensity'); num(l, 'distance'); };
+    const glow = (it) => { col(it.mat.color); num(it.mat, 'opacity'); vec(it.sprite.scale); };
+    this.stadiumFloodLights.forEach(light);
+    this.stadiumCoreLights.forEach(light);
+    this.stadiumGlowSprites.forEach(glow);
+    this.stadiumCrownGlowSprites.forEach(glow);
+
+    if (this.resortPathways) {
+      const lb = this.resortPathways.lampBulbMaterial;
+      if (lb) { col(lb.emissive); num(lb, 'emissiveIntensity'); }
+      (this.resortPathways.streetLamps || []).forEach((lamp) => {
+        if (lamp.glowMat) { col(lamp.glowMat.color); num(lamp.glowMat, 'opacity'); }
+        if (lamp.sprite) vec(lamp.sprite.scale);
+        if (lamp.light) light(lamp.light);
+      });
+    }
+    if (this.stadiumBulbMaterial) { col(this.stadiumBulbMaterial.emissive); num(this.stadiumBulbMaterial, 'emissiveIntensity'); }
+    this.stadiumLightMaterials.forEach((m) => { col(m.emissive); num(m, 'emissiveIntensity'); });
+    this.islandGroup.traverse((child) => {
+      if (child.isMesh && (child.name || '').toLowerCase().includes('stadium_led_ring')) col(child.material.color);
+    });
+    return list;
+  }
+
+  _snapshotTweenables(list) {
+    return list.map((it) => (it.t === 'n' ? it.o[it.p] : it.t === 'c' ? it.c.clone() : it.v.clone()));
+  }
+
+  _writeTweenables(list, a, b, k) {
+    for (let i = 0; i < list.length; i++) {
+      const it = list[i];
+      if (it.t === 'n') it.o[it.p] = a[i] + (b[i] - a[i]) * k;
+      else if (it.t === 'c') it.c.copy(a[i]).lerp(b[i], k);
+      else it.v.copy(a[i]).lerp(b[i], k);
+    }
+  }
+
+  setTimeOfDay(mode = 'day', duration = 2.0) {
+    // 최초 1회(초기화)는 즉시 적용
+    if (!this._todReady) {
+      this._applyTimeOfDay(mode);
+      this._todReady = true;
+      return;
+    }
+    if (mode === this.currentTod && !this._todTween) return;
+
+    const items = this._collectTweenables();
+    const from = this._snapshotTweenables(items); // 진행 중인 전환이 있으면 그 중간값이 시작점
+    this._todTween = null;
+
+    this._applyTimeOfDay(mode);                   // 최종값 계산 (환경맵/별/그림자 방향 등 포함)
+    const to = this._snapshotTweenables(items);
+
+    if (duration <= 0) return;
+    this._writeTweenables(items, from, to, 0);    // 시작점으로 되돌리고 서서히 이동
+    this._todTween = { items, from, to, t: 0, dur: duration };
+  }
+
   cycleTimeOfDay() {
     const modes = ['day', 'sunset', 'night'];
     const nextIdx = (modes.indexOf(this.currentTod) + 1) % modes.length;
@@ -547,11 +832,53 @@ class TennisIslandCinematicViewer {
     return this.currentTod;
   }
 
-  setTimeOfDay(mode = 'day') {
+  _applyTimeOfDay(mode = 'day') {
     this.currentTod = mode;
 
-    // 1. 스카이 캔버스 그라디언트 갱신
-    if (this.skyCanvas && this.skyCtx && this.skyTexture) {
+    // 0. 대기 산란 하늘 파라미터 (시간대별 태양 고도/방위)
+    if (this.sky) {
+      const P = {
+        day:    { elev: 38, azim: 150, turb: 1.6,  ray: 3.6, mie: 0.0015, g: 0.80, exp: 0.52 },
+        sunset: { elev: 3,  azim: 200, turb: 8,    ray: 2.4, mie: 0.008, g: 0.90, exp: 0.40 },
+        night:  { elev: -5, azim: 150, turb: 1.0,  ray: 0.55, mie: 0.002, g: 0.70, exp: 0.50 }
+      }[mode] || null;
+      if (P) {
+        const phi = THREE.MathUtils.degToRad(90 - P.elev);
+        const theta = THREE.MathUtils.degToRad(P.azim);
+        this.sunDir.setFromSphericalCoords(1, phi, theta);
+        [this.sky, this.skyEnv].forEach((sk) => {
+          const u = sk.material.uniforms;
+          u.turbidity.value = P.turb;
+          u.rayleigh.value = P.ray;
+          u.mieCoefficient.value = P.mie;
+          u.mieDirectionalG.value = P.g;
+          u.sunPosition.value.copy(this.sunDir);
+        });
+        if (this.renderer) this.renderer.toneMappingExposure = P.exp * 2.4;
+        if (this.starMat) this.starMat.opacity = mode === 'night' ? 0.95 : 0;
+
+        // 태양 광원 방향을 하늘의 태양과 일치 (낮/노을). 밤은 달빛이 위에서
+        if (this.sunLight) {
+          if (mode === 'night') {
+            this.sunLight.position.set(-120, 230, -380);
+            if (this.fillLight) this.fillLight.position.set(200, 160, 350);
+          }
+          else {
+            this.sunLight.position.copy(this.sunDir).multiplyScalar(460);
+            if (this.fillLight) this.fillLight.position.set(-220, 160, -220);
+          }
+        }
+
+        if (this.pmrem) {
+          if (this.envRT) this.envRT.dispose();
+          this.envRT = this.pmrem.fromScene(this.skyEnvScene, 0.02);
+          this.applyEnvironmentDetail();
+        }
+      }
+    }
+
+    // 1. 스카이 캔버스 그라디언트 갱신 (레거시, 대기 하늘 사용 시 미표시)
+    if (false && this.skyCanvas && this.skyCtx && this.skyTexture) {
       const ctx = this.skyCtx;
       const grad = ctx.createLinearGradient(0, 0, 0, 512);
 
@@ -580,6 +907,16 @@ class TennisIslandCinematicViewer {
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, 512, 512);
       this.skyTexture.needsUpdate = true;
+
+      // 반사용 환경맵 갱신 (바다에 하늘이 비치도록)
+      if (this.pmrem && this.skyEnvScene) {
+        if (this.envRT) this.envRT.dispose();
+        this.envRT = this.pmrem.fromScene(this.skyEnvScene, 0.02);
+        if (this.waterMesh) {
+          this.waterMesh.material.envMap = this.envRT.texture;
+          this.waterMesh.material.needsUpdate = true;
+        }
+      }
     }
 
     // 2. 환경 조명 & 앰비언스 & 포그 갱신
@@ -587,17 +924,16 @@ class TennisIslandCinematicViewer {
       if (mode === 'day') {
         this.hemiLight.color.setHex(0x7dd3fc);
         this.hemiLight.groundColor.setHex(0x86efac);
-        this.hemiLight.intensity = 1.5;
+        this.hemiLight.intensity = 2.2;
 
-        this.sunLight.color.setHex(0xfff5e6);
-        this.sunLight.intensity = 2.9;
+        this.sunLight.color.setHex(0xfff2d6);
+        this.sunLight.intensity = 3.6;
 
         this.fillLight.color.setHex(0x38bdf8);
         this.fillLight.intensity = 0.95;
 
-        if (this.scene.fog) this.scene.fog.color.setHex(0xbde8ff);
-        if (this.renderer) this.renderer.toneMappingExposure = 1.28;
-        if (this.waterMesh) this.waterMesh.material.color.setHex(0x0284c7);
+        if (this.scene.fog) this.scene.fog.color.setHex(0x9bdcff);
+                if (this.waterMesh) { this.waterMesh.material.color.setHex(0x1ec8ff); this.waterMesh.material.roughness = 0.1; this.waterMesh.material.specularIntensity = 1.0; }
       } else if (mode === 'sunset') {
         this.hemiLight.color.setHex(0xf472b6);
         this.hemiLight.groundColor.setHex(0xd97706);
@@ -610,22 +946,20 @@ class TennisIslandCinematicViewer {
         this.fillLight.intensity = 1.2;
 
         if (this.scene.fog) this.scene.fog.color.setHex(0xfbcfe8);
-        if (this.renderer) this.renderer.toneMappingExposure = 1.35;
-        if (this.waterMesh) this.waterMesh.material.color.setHex(0x0369a1);
+                if (this.waterMesh) { this.waterMesh.material.color.setHex(0x0369a1); this.waterMesh.material.roughness = 0.1; this.waterMesh.material.specularIntensity = 1.0; }
       } else if (mode === 'night') {
-        this.hemiLight.color.setHex(0x60a5fa);
-        this.hemiLight.groundColor.setHex(0x1e3a5f);
-        this.hemiLight.intensity = 1.35;
+        this.hemiLight.color.setHex(0x5b7cff);
+        this.hemiLight.groundColor.setHex(0x1b2f5a);
+        this.hemiLight.intensity = 1.6;
 
-        this.sunLight.color.setHex(0x93c5fd);
-        this.sunLight.intensity = 2.5;
+        this.sunLight.color.setHex(0x9ec5ff);
+        this.sunLight.intensity = 3.3;
 
-        this.fillLight.color.setHex(0x818cf8);
-        this.fillLight.intensity = 1.15;
+        this.fillLight.color.setHex(0x6d7cff);
+        this.fillLight.intensity = 1.7;
 
         if (this.scene.fog) this.scene.fog.color.setHex(0x0b1736);
-        if (this.renderer) this.renderer.toneMappingExposure = 1.38;
-        if (this.waterMesh) this.waterMesh.material.color.setHex(0x021f4a);
+                if (this.waterMesh) { this.waterMesh.material.color.setHex(0x06407f); this.waterMesh.material.roughness = 0.14; this.waterMesh.material.specularIntensity = 1.0; }
       }
     }
 
@@ -671,9 +1005,9 @@ class TennisIslandCinematicViewer {
     } else if (mode === 'night') {
       // 밤 시간대: 멀리서 봐도 너무 어둡지 않게 은은하고 영롱한 스타디움 돔 글로우 & 코어 조명 강화
       this.stadiumFloodLights.forEach((light) => {
-        light.color.setHex(0xffffff);
-        light.intensity = 1.35;
-        light.distance = 185;
+        light.color.setHex(0xffe2b0);
+        light.intensity = 2.6;
+        light.distance = 200;
       });
       this.stadiumGlowSprites.forEach((item) => {
         item.mat.color.setHex(0xe2f1ff);
@@ -686,9 +1020,9 @@ class TennisIslandCinematicViewer {
         item.sprite.scale.set(70.0, 70.0, 1.0);
       });
       this.stadiumCoreLights.forEach((light) => {
-        light.color.setHex(0x93c5fd);
-        light.intensity = 1.8;
-        light.distance = 190;
+        light.color.setHex(0x38bdf8);
+        light.intensity = 3.2;
+        light.distance = 210;
       });
     }
 
@@ -727,9 +1061,9 @@ class TennisIslandCinematicViewer {
             lamp.sprite.scale.set(12.5, 12.5, 1.0);
           }
           if (lamp.light) {
-            lamp.light.color.setHex(0xffe680);
-            lamp.light.intensity = 1.65;
-            lamp.light.distance = 55;
+            lamp.light.color.setHex(0xffd27a);
+            lamp.light.intensity = 3.0;
+            lamp.light.distance = 70;
           }
         });
       }
@@ -922,16 +1256,34 @@ class TennisIslandCinematicViewer {
   ========================================================================= */
   updateCameraForScroll(p) {
     this.scrollProgress = Math.max(0, Math.min(1, p));
+    const orbit = this._orbitTime || 0;
 
-    // 1. 오프닝 스카이뷰 -> 테니스 돔 진입 (p: 0.00 ~ 0.04)
-    if (this.scrollProgress <= 0.04) {
-      const f = this.scrollProgress / 0.04;
-      this.targetCamPos.lerpVectors(this.skyCamPos, new THREE.Vector3(-148, 48, 40), f);
-      this.targetLookAt.lerpVectors(this.skyLookAt, this.tennisStadiumCenter, f);
+    // -------------------------------------------------------------
+    // 1. 오프닝 스카이뷰 -> Step 1: 🎾 테니스 경기장 외경 인트로 (p: 0.00 ~ 0.08)
+    // -------------------------------------------------------------
+    if (this.scrollProgress <= 0.08) {
+      const f = this.scrollProgress / 0.08;
+      const easeF = f * f * (3 - 2 * f);
+
+      const center = this.tennisStadiumCenter;
+      // 스카이뷰(Hero)에서 보이는 방향과 정확히 일치하는 직선 줌인 벡터
+      // skyCamPos(25, 205, 435) -> tennisStadiumCenter(-160, 1.2, 0)
+      // dx: -185, dy: -203.8, dz: -435 (각도 불변 일직선 줌인)
+      const introPos = new THREE.Vector3(
+        center.x + 68.0,  // -92.0
+        78.0,
+        center.z + 160.0  // +160.0
+      );
+      const introLook = new THREE.Vector3(center.x, center.y + 6.0, center.z);
+
+      this.targetCamPos.lerpVectors(this.skyCamPos, introPos, easeF);
+      this.targetLookAt.lerpVectors(this.skyLookAt, introLook, easeF);
     }
-    // 2. 🎾 테니스 경기장 내부 완결 공전 (Step 1 ~ 3, p: 0.04 ~ 0.28)
+    // -------------------------------------------------------------
+    // 2. 🎾 테니스 경기장 내부 완결 진입 & 공전 (Step 2 ~ 4, p: 0.08 ~ 0.28)
+    // -------------------------------------------------------------
     else if (this.scrollProgress <= 0.28) {
-      const t = (this.scrollProgress - 0.04) / 0.24;
+      const t = (this.scrollProgress - 0.08) / 0.20;
       const angle = t * Math.PI * 1.5 - 0.2;
       const radius = 24.5 - t * 2.5;
       const height = 7.8 + Math.sin(t * Math.PI) * 3.8;
@@ -942,15 +1294,24 @@ class TennisIslandCinematicViewer {
       this.targetCamPos.set(camX, height, camZ);
       this.targetLookAt.copy(this.tennisStadiumCenter);
     }
-    // 3. 전환 1: 테니스 ➔ 볼링 상공 부드러운 곡선 활공 비행 (p: 0.28 ~ 0.40)
-    else if (this.scrollProgress <= 0.40) {
-      const rawT = (this.scrollProgress - 0.28) / 0.12;
-      const s = rawT * rawT * (3 - 2 * rawT); // Smooth cubic ease
+    // -------------------------------------------------------------
+    // 3. 전환 1: 테니스 ➔ Step 5: 🎳 볼링 경기장 외경 인트로 (p: 0.28 ~ 0.44)
+    // -------------------------------------------------------------
+    else if (this.scrollProgress <= 0.44) {
+      const rawT = (this.scrollProgress - 0.28) / 0.16;
+      const s = rawT * rawT * (3 - 2 * rawT);
 
-      // 완만한 2차 베지어 곡선으로 리조트 중앙 만(bay) 위를 우아하게 활공
       const p0 = new THREE.Vector3(-176, 14, 15);
-      const p1 = new THREE.Vector3(-20, 78, -75);
-      const p2 = new THREE.Vector3(120, 36, -135);
+      const p1 = new THREE.Vector3(-20, 82, -80);
+
+      // 볼링 외경 인트로 목표 위치 (더 멀리 떨어지고 더 높은 뷰에서 천천히 선회)
+      const centerB = this.bowlingStadiumCenter;
+      const angleB = -1.0; // 회전 없이 안정적인 뷰
+      const p2 = new THREE.Vector3(
+        centerB.x + Math.sin(angleB) * 135.0,
+        78.0,
+        centerB.z + Math.cos(angleB) * 135.0
+      );
 
       const oneMinusS = 1 - s;
       const posX = oneMinusS * oneMinusS * p0.x + 2 * oneMinusS * s * p1.x + s * s * p2.x;
@@ -960,15 +1321,17 @@ class TennisIslandCinematicViewer {
 
       const look0 = this.tennisStadiumCenter;
       const look1 = new THREE.Vector3(0, 15, -75);
-      const look2 = this.bowlingStadiumCenter;
+      const look2 = new THREE.Vector3(centerB.x, centerB.y + 4.0, centerB.z);
       const lookX = oneMinusS * oneMinusS * look0.x + 2 * oneMinusS * s * look1.x + s * s * look2.x;
       const lookY = oneMinusS * oneMinusS * look0.y + 2 * oneMinusS * s * look1.y + s * s * look2.y;
       const lookZ = oneMinusS * oneMinusS * look0.z + 2 * oneMinusS * s * look1.z + s * s * look2.z;
       this.targetLookAt.set(lookX, lookY, lookZ);
     }
-    // 4. 🎳 볼링 경기장 내부 완결 공전 (Step 4 ~ 6, p: 0.40 ~ 0.62)
-    else if (this.scrollProgress <= 0.62) {
-      const t = (this.scrollProgress - 0.40) / 0.22;
+    // -------------------------------------------------------------
+    // 4. 🎳 볼링 경기장 내부 완결 진입 & 공전 (Step 6 ~ 8, p: 0.44 ~ 0.64)
+    // -------------------------------------------------------------
+    else if (this.scrollProgress <= 0.64) {
+      const t = (this.scrollProgress - 0.44) / 0.20;
       const angle = t * Math.PI * 1.5 - Math.PI * 0.35;
       const radius = 25.0 - t * 2.0;
       const height = 8.0 + Math.sin(t * Math.PI) * 3.6;
@@ -979,15 +1342,24 @@ class TennisIslandCinematicViewer {
       this.targetCamPos.set(camX, height, camZ);
       this.targetLookAt.copy(this.bowlingStadiumCenter);
     }
-    // 5. 전환 2: 볼링 ➔ 검술 상공 부드러운 곡선 활공 비행 (p: 0.62 ~ 0.74)
-    else if (this.scrollProgress <= 0.74) {
-      const rawT = (this.scrollProgress - 0.62) / 0.12;
+    // -------------------------------------------------------------
+    // 5. 전환 2: 볼링 ➔ Step 9: ⚔️ 검술 경기장 외경 인트로 (p: 0.64 ~ 0.78)
+    // -------------------------------------------------------------
+    else if (this.scrollProgress <= 0.78) {
+      const rawT = (this.scrollProgress - 0.64) / 0.14;
       const s = rawT * rawT * (3 - 2 * rawT);
 
-      // 동쪽 해안선과 야경을 따라 우아하게 비행
       const p0 = new THREE.Vector3(144, 15, -135);
-      const p1 = new THREE.Vector3(180, 80, 0);
-      const p2 = new THREE.Vector3(122, 36, 135);
+      const p1 = new THREE.Vector3(185, 84, 0);
+
+      // 검술 외경 인트로 목표 위치 (더 멀리 떨어지고 더 높은 뷰에서 천천히 선회)
+      const centerS = this.swordStadiumCenter;
+      const angleS = 0.8; // 회전 없이 안정적인 뷰
+      const p2 = new THREE.Vector3(
+        centerS.x + Math.sin(angleS) * 135.0,
+        78.0,
+        centerS.z + Math.cos(angleS) * 135.0
+      );
 
       const oneMinusS = 1 - s;
       const posX = oneMinusS * oneMinusS * p0.x + 2 * oneMinusS * s * p1.x + s * s * p2.x;
@@ -997,15 +1369,17 @@ class TennisIslandCinematicViewer {
 
       const look0 = this.bowlingStadiumCenter;
       const look1 = new THREE.Vector3(145, 12, 0);
-      const look2 = this.swordStadiumCenter;
+      const look2 = new THREE.Vector3(centerS.x, centerS.y + 4.0, centerS.z);
       const lookX = oneMinusS * oneMinusS * look0.x + 2 * oneMinusS * s * look1.x + s * s * look2.x;
       const lookY = oneMinusS * oneMinusS * look0.y + 2 * oneMinusS * s * look1.y + s * s * look2.y;
       const lookZ = oneMinusS * oneMinusS * look0.z + 2 * oneMinusS * s * look1.z + s * s * look2.z;
       this.targetLookAt.set(lookX, lookY, lookZ);
     }
-    // 6. ⚔️ 검술 경기장 내부 완결 공전 (Step 7 ~ 9, p: 0.74 ~ 0.92)
-    else if (this.scrollProgress <= 0.92) {
-      const t = (this.scrollProgress - 0.74) / 0.18;
+    // -------------------------------------------------------------
+    // 6. ⚔️ 검술 경기장 내부 완결 진입 & 공전 (Step 10 ~ 12, p: 0.78 ~ 0.94)
+    // -------------------------------------------------------------
+    else if (this.scrollProgress <= 0.94) {
+      const t = (this.scrollProgress - 0.78) / 0.16;
       const angle = t * Math.PI * 1.5 + Math.PI * 0.22;
       const radius = 24.5 - t * 2.0;
       const height = 8.0 + Math.sin(t * Math.PI) * 3.6;
@@ -1016,13 +1390,15 @@ class TennisIslandCinematicViewer {
       this.targetCamPos.set(camX, height, camZ);
       this.targetLookAt.copy(this.swordStadiumCenter);
     }
-    // 7. 전환 3 & 피날레: 3대 경기장 전체 조망 항공뷰로 상승 (Step 10, p: 0.92 ~ 1.00)
+    // -------------------------------------------------------------
+    // 7. 전환 3: Step 13 🏆 3대 경기장 항공뷰 피날레 (p: 0.94 ~ 1.00)
+    // -------------------------------------------------------------
     else {
-      const rawT = (this.scrollProgress - 0.92) / 0.08;
+      const rawT = (this.scrollProgress - 0.94) / 0.06;
       const s = rawT * rawT * (3 - 2 * rawT);
 
       const p0 = new THREE.Vector3(142, 18, 160);
-      const p1 = new THREE.Vector3(80, 135, 330);
+      const p1 = new THREE.Vector3(80, 140, 330);
       const p2 = this.skyCamPos;
 
       const oneMinusS = 1 - s;
@@ -1032,7 +1408,7 @@ class TennisIslandCinematicViewer {
       this.targetCamPos.set(posX, posY, posZ);
 
       const look0 = this.swordStadiumCenter;
-      const look1 = new THREE.Vector3(-10, 18, 50);
+      const look1 = new THREE.Vector3(0, 30, 0);
       const look2 = this.skyLookAt;
       const lookX = oneMinusS * oneMinusS * look0.x + 2 * oneMinusS * s * look1.x + s * s * look2.x;
       const lookY = oneMinusS * oneMinusS * look0.y + 2 * oneMinusS * s * look1.y + s * s * look2.y;
@@ -1049,6 +1425,10 @@ class TennisIslandCinematicViewer {
       this.camera.aspect = w / h;
       this.camera.updateProjectionMatrix();
       this.renderer.setSize(w, h);
+      if (this.composer) {
+        this.composer.setSize(w, h);
+        this.bloomPass.setSize(w, h);
+      }
     });
   }
 
@@ -1056,6 +1436,7 @@ class TennisIslandCinematicViewer {
     requestAnimationFrame(this.animate);
     const delta = this.clock.getDelta();
     const elapsed = this.clock.getElapsedTime();
+    this._orbitTime = (this._orbitTime || 0) + delta;
 
     // 1. 솜사탕 구름 부드러운 자전
     if (this.cloudsGroup) {
@@ -1069,6 +1450,10 @@ class TennisIslandCinematicViewer {
         this.waterMesh.material.map.offset.y = (this.waterMesh.material.map.offset.y + delta * 0.008) % 1;
       }
       this.waterMesh.material.opacity = 0.93 + Math.sin(elapsed * 1.5) * 0.02;
+      if (this.waterNormalMap) {
+        this.waterNormalMap.offset.x = (this.waterNormalMap.offset.x - delta * 0.018) % 1;
+        this.waterNormalMap.offset.y = (this.waterNormalMap.offset.y + delta * 0.011) % 1;
+      }
     }
 
     // 3. 리조트 세일보트 잔물결 롤링/피칭
@@ -1102,7 +1487,39 @@ class TennisIslandCinematicViewer {
     this.camera.position.copy(this.currentCamPos);
     this.camera.lookAt(this.currentLookAt);
 
-    this.renderer.render(this.scene, this.camera);
+    // 시간대 전환 보간 (2초, ease in-out)
+    if (this._todTween) {
+      const tw = this._todTween;
+      tw.t += delta;
+      const p = Math.min(tw.t / tw.dur, 1);
+      const k = p * p * (3 - 2 * p);
+      this._writeTweenables(tw.items, tw.from, tw.to, k);
+      if (p >= 1) this._todTween = null;
+    }
+
+    // 경기장 FBX가 비동기로 늘어나므로 로드 후 한 번 더 환경 반사 적용
+    this._envFrames = (this._envFrames || 0) + 1;
+    if (this._envFrames === 240 || this._envFrames === 900) this.applyEnvironmentDetail();
+
+    if (this.composer) {
+      const kb = 1 - Math.exp(-delta * 1.6);
+      const tb = this.bloomTargets[this.currentTod] ?? 0.3;
+      this.bloomPass.strength += (tb - this.bloomPass.strength) * kb;
+      const g = this.gradeTargets[this.currentTod];
+      if (g && this.gradePass) {
+        const u = this.gradePass.uniforms;
+        u.tint.value.lerp(new THREE.Vector3(...g.tint), kb);
+        u.shadowTint.value.lerp(new THREE.Vector3(...g.shadow), kb);
+        u.sat.value += (g.sat - u.sat.value) * kb;
+        u.contrast.value += (g.contrast - u.contrast.value) * kb;
+        u.vignette.value += (g.vig - u.vignette.value) * kb;
+      }
+      const th = this.bloomThresholds[this.currentTod] ?? 1.0;
+      this.bloomPass.threshold += (th - this.bloomPass.threshold) * kb;
+      this.composer.render(delta);
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
   }
 }
 

@@ -91,7 +91,6 @@ public class GameManager : MonoBehaviour
 
     private readonly string[] difficultyNames = { "EASY", "NORMAL", "HARD" };
 
-    // VR 컨트롤러 입력 액션 (일시정지, UI 클릭, 썸스틱 선택)
     private InputAction vrPauseAction;
     private InputAction vrUIClickAction;
     private InputAction vrLeftStickAction;
@@ -102,6 +101,13 @@ public class GameManager : MonoBehaviour
     private Button currentHoveredBtn;
     private float lastUIActionTime = -10f;
     private float lastStickSelectTime = -10f;
+    [Header("Camera & Overview View Settings")]
+    public Transform overviewViewPoint; // 60도 상공 뷰 위치 (코트 위에서 내려다보는 뷰)
+    public Transform playerViewPoint;   // 플레이 모드 정상 플레이어 위치
+
+    private Vector3 originalRigPosition = new Vector3(-0.06f, 0f, -1.499f);
+    private Quaternion originalRigRotation = Quaternion.Euler(0f, 180f, 0f);
+
     private Vector3 savedBallVelocity;
     private Vector3 savedBallAngularVelocity;
     private bool savedBallWasKinematic;
@@ -120,9 +126,17 @@ public class GameManager : MonoBehaviour
         SetupVRControllerInputs();
         BindAllUIButtons();
 
-        if (vrPlayerRig != null) vrPlayerRig.SetActive(true);
+        if (vrPlayerRig != null)
+        {
+            vrPlayerRig.SetActive(true);
+            originalRigPosition = vrPlayerRig.transform.position;
+            originalRigRotation = vrPlayerRig.transform.rotation;
 
-        // 초기 진입 시: VR 시작 화면 표시
+            // 기본 Locomotion Move가 켜져 있으면 조이스틱으로 메뉴 조작 시 캐릭터가 이동하므로 비활성화
+            Transform locoMove = vrPlayerRig.transform.Find("Locomotion/Move");
+            if (locoMove != null) locoMove.gameObject.SetActive(false);
+        }
+
         isGameStarted = false;
         isGamePaused = false;
         ShowMainMenu();
@@ -150,6 +164,7 @@ public class GameManager : MonoBehaviour
         vrPauseAction.AddBinding("<XRController>{LeftHand}/menuButton");
         vrPauseAction.AddBinding("<XRController>{RightHand}/menuButton");
         vrPauseAction.AddBinding("<XRController>{LeftHand}/secondaryButton");
+        vrPauseAction.AddBinding("<Keyboard>/escape");
         vrPauseAction.Enable();
 
         vrUIClickAction = new InputAction("VRUIClick", InputActionType.Button);
@@ -230,7 +245,7 @@ public class GameManager : MonoBehaviour
 
     private void ExecuteUIAction(System.Action action)
     {
-        if (Time.unscaledTime - lastUIActionTime < 0.2f) return;
+        if (Time.unscaledTime - lastUIActionTime < 0.18f) return;
         lastUIActionTime = Time.unscaledTime;
         TriggerUIHaptic(0.35f, 0.06f);
         action?.Invoke();
@@ -238,24 +253,24 @@ public class GameManager : MonoBehaviour
 
     void Update()
     {
-        // 경기 중 일시정지 토글 (VR 메뉴 버튼)
-        if (isGameStarted && vrPauseAction != null && vrPauseAction.triggered)
+        // 경기 중 일시정지 토글 (VR 메뉴 버튼 또는 ESC)
+        if (isGameStarted && vrPauseAction != null && vrPauseAction.WasPressedThisFrame())
         {
             if (isGamePaused) ResumeGame();
             else PauseGame();
         }
 
-        // UI가 열려 있을 때 VR 컨트롤러 직접 레이캐스트 & 썸스틱 보조 조작 처리
+        // UI가 열려 있을 때 VR 컨트롤러 직접 레이캐스트 & PC 마우스 & 썸스틱 보조 조작 처리
         if (!isGameStarted || isGamePaused)
         {
-            UpdateVRControllerUIRaycast();
+            UpdateUIRaycast();
             UpdateSelectionThumbstickShortcuts();
         }
     }
 
-    private void UpdateVRControllerUIRaycast()
+    private void UpdateUIRaycast()
     {
-        Button hitBtn = FindButtonAimedByVRControllers();
+        Button hitBtn = FindButtonAimed();
 
         if (hitBtn != currentHoveredBtn)
         {
@@ -271,20 +286,56 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        if (currentHoveredBtn != null && vrUIClickAction != null && vrUIClickAction.triggered)
+        bool clickTriggered = (vrUIClickAction != null && vrUIClickAction.WasPressedThisFrame());
+        if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame)
+        {
+            clickTriggered = true;
+        }
+
+        if (currentHoveredBtn != null && clickTriggered)
         {
             currentHoveredBtn.onClick.Invoke();
         }
     }
 
-    private Button FindButtonAimedByVRControllers()
+    private Button FindButtonAimed()
     {
-        Transform[] controllers = { rightControllerTf, leftControllerTf };
         Button[] allButtons = Resources.FindObjectsOfTypeAll<Button>();
-
         Button bestBtn = null;
-        float bestDist = 15f;
+        float bestDist = 20f;
 
+        // 1. PC 마우스 레이캐스트 검사
+        if (Mouse.current != null && Camera.main != null)
+        {
+            Ray mouseRay = Camera.main.ScreenPointToRay(Mouse.current.position.ReadValue());
+            foreach (Button btn in allButtons)
+            {
+                if (btn == null || !btn.gameObject.activeInHierarchy || !btn.interactable) continue;
+                if (btn.gameObject.scene != gameObject.scene) continue;
+
+                RectTransform rt = btn.GetComponent<RectTransform>();
+                if (rt == null) continue;
+
+                Plane plane = new Plane(rt.forward, rt.position);
+                if (plane.Raycast(mouseRay, out float enter) && enter > 0.05f && enter < bestDist)
+                {
+                    Vector3 worldHit = mouseRay.GetPoint(enter);
+                    Vector3 localHit = rt.InverseTransformPoint(worldHit);
+                    Rect rect = rt.rect;
+                    Rect padded = new Rect(rect.xMin - 10f, rect.yMin - 10f, rect.width + 20f, rect.height + 20f);
+                    if (padded.Contains(new Vector2(localHit.x, localHit.y)))
+                    {
+                        bestDist = enter;
+                        bestBtn = btn;
+                    }
+                }
+            }
+
+            if (bestBtn != null) return bestBtn;
+        }
+
+        // 2. VR 컨트롤러 레이캐스트 검사
+        Transform[] controllers = { rightControllerTf, leftControllerTf };
         foreach (Transform ctrl in controllers)
         {
             if (ctrl == null || !ctrl.gameObject.activeInHierarchy) continue;
@@ -305,9 +356,8 @@ public class GameManager : MonoBehaviour
                     Vector3 worldHit = ray.GetPoint(enter);
                     Vector3 localHit = rt.InverseTransformPoint(worldHit);
                     Rect rect = rt.rect;
-                    // 약간의 여유 판정(Padding)을 주어 VR에서 훨씬 쉽게 조준/클릭 가능하도록 보정
                     Rect padded = new Rect(rect.xMin - 12f, rect.yMin - 12f, rect.width + 24f, rect.height + 24f);
-                    if (padded.Contains( new Vector2(localHit.x, localHit.y) ))
+                    if (padded.Contains(new Vector2(localHit.x, localHit.y)))
                     {
                         bestDist = enter;
                         bestBtn = btn;
@@ -324,7 +374,6 @@ public class GameManager : MonoBehaviour
         if (vrSelectionUI == null || !vrSelectionUI.activeInHierarchy) return;
         if (Time.unscaledTime - lastStickSelectTime < 0.35f) return;
 
-        // 왼손 조이스틱 좌/우: 캐릭터 변경
         if (vrLeftStickAction != null)
         {
             Vector2 leftStick = vrLeftStickAction.ReadValue<Vector2>();
@@ -340,7 +389,6 @@ public class GameManager : MonoBehaviour
             }
         }
 
-        // 오른손 조이스틱 좌/우: 라켓 변경
         if (vrRightStickAction != null)
         {
             Vector2 rightStick = vrRightStickAction.ReadValue<Vector2>();
@@ -366,19 +414,44 @@ public class GameManager : MonoBehaviour
         }
     }
 
-    private void PositionCanvasInFrontOfVRPlayer(GameObject canvasObj, float distance = 2.0f, float heightOffset = 0.05f)
+    private void PositionCanvasInFrontOfVRPlayer(GameObject canvasObj, float distance = 2.0f, float heightOffset = 0.05f, bool matchCameraPitch = false)
     {
         if (canvasObj == null) return;
         Camera cam = Camera.main;
         if (cam != null)
         {
-            Vector3 forward = cam.transform.forward;
-            forward.y = 0f;
-            if (forward.sqrMagnitude > 0.001f) forward.Normalize();
-            else forward = Vector3.back;
+            if (matchCameraPitch)
+            {
+                canvasObj.transform.position = cam.transform.position + cam.transform.forward * distance + cam.transform.up * heightOffset;
+                canvasObj.transform.rotation = cam.transform.rotation;
+            }
+            else
+            {
+                Vector3 forward = cam.transform.forward;
+                forward.y = 0f;
+                if (forward.sqrMagnitude > 0.001f) forward.Normalize();
+                else forward = Vector3.back;
 
-            canvasObj.transform.position = cam.transform.position + forward * distance + Vector3.up * heightOffset;
-            canvasObj.transform.rotation = Quaternion.LookRotation(forward);
+                canvasObj.transform.position = cam.transform.position + forward * distance + Vector3.up * heightOffset;
+                canvasObj.transform.rotation = Quaternion.LookRotation(forward);
+            }
+        }
+    }
+
+    private void HideBallOutsidePlay()
+    {
+        Ball b = Object.FindFirstObjectByType<Ball>();
+        if (b != null)
+        {
+            b.SetKinematic(true);
+            b.SetVisible(false);
+            b.transform.position = new Vector3(0f, -5f, Ball.NET_Z);
+        }
+
+        if (vrPlayerRig != null)
+        {
+            VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
+            if (vr != null) vr.SetRacketVisible(false);
         }
     }
 
@@ -386,12 +459,20 @@ public class GameManager : MonoBehaviour
 
     public void ShowMainMenu()
     {
+        CancelInvoke(nameof(ResetRound));
+        isPointProcessing = false;
         isGameStarted = false;
         isGamePaused = false;
         Time.timeScale = 1f;
 
+        // 시작화면에서는 일반 플레이어 위치로 복귀
         if (vrPlayerRig != null)
         {
+            Vector3 targetPos = (playerViewPoint != null) ? playerViewPoint.position : originalRigPosition;
+            Quaternion targetRot = (playerViewPoint != null) ? playerViewPoint.rotation : originalRigRotation;
+            vrPlayerRig.transform.position = targetPos;
+            vrPlayerRig.transform.rotation = targetRot;
+
             VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
             if (vr != null) vr.ResetToStart();
         }
@@ -399,7 +480,8 @@ public class GameManager : MonoBehaviour
         if (vrMenuCanvas != null)
         {
             vrMenuCanvas.SetActive(true);
-            PositionCanvasInFrontOfVRPlayer(vrMenuCanvas, 2.1f, 0.1f);
+            vrMenuCanvas.transform.localScale = new Vector3(0.0019f, 0.0019f, 0.0019f);
+            PositionCanvasInFrontOfVRPlayer(vrMenuCanvas, 1.35f, 0.0f, true);
         }
 
         if (vrMainMenuPanel != null) vrMainMenuPanel.SetActive(true);
@@ -410,8 +492,7 @@ public class GameManager : MonoBehaviour
         if (victoryPanel != null) victoryPanel.SetActive(false);
         if (losePanel != null) losePanel.SetActive(false);
 
-        Ball b = Object.FindFirstObjectByType<Ball>();
-        if (b != null) b.SetKinematic(true);
+        HideBallOutsidePlay();
     }
 
     public void OpenSettings(bool fromPause)
@@ -421,7 +502,7 @@ public class GameManager : MonoBehaviour
         if (vrMenuCanvas != null)
         {
             vrMenuCanvas.SetActive(true);
-            PositionCanvasInFrontOfVRPlayer(vrMenuCanvas, 2.1f, 0.1f);
+            PositionCanvasInFrontOfVRPlayer(vrMenuCanvas, 2.0f, 0.05f);
         }
 
         if (vrMainMenuPanel != null) vrMainMenuPanel.SetActive(false);
@@ -453,16 +534,32 @@ public class GameManager : MonoBehaviour
 
     public void ShowSelectionPanel()
     {
+        // 코트가 사선으로 펼쳐지는 45도 상공 조감도(오버헤드) 뷰로 카메라 릭 이동
+        if (vrPlayerRig != null)
+        {
+            Vector3 targetPos = (overviewViewPoint != null) ? overviewViewPoint.position : new Vector3(11.0f, 13.5f, -3.5f);
+            Quaternion targetRot = (overviewViewPoint != null) ? overviewViewPoint.rotation : Quaternion.Euler(39.0f, 225.0f, 0f);
+            vrPlayerRig.transform.position = targetPos;
+            vrPlayerRig.transform.rotation = targetRot;
+
+            VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
+            if (vr != null) vr.SetRacketVisible(false);
+        }
+
         if (vrMenuCanvas != null)
         {
             vrMenuCanvas.SetActive(true);
-            PositionCanvasInFrontOfVRPlayer(vrMenuCanvas, 2.1f, 0.1f);
+            // 선택 창을 2배로 시원하게 확대 (0.0016f -> 0.0032f)
+            vrMenuCanvas.transform.localScale = new Vector3(0.0032f, 0.0032f, 0.0032f);
+            // 사선 조감도 시야 전방 3.6m에 카메라 피치와 맞춰 배치하여 코트 배경과 2배 커진 선택창이 한눈에 들어오도록 설정
+            PositionCanvasInFrontOfVRPlayer(vrMenuCanvas, 3.6f, -0.1f, true);
         }
 
         if (vrMainMenuPanel != null) vrMainMenuPanel.SetActive(false);
         if (vrSettingsPanel != null) vrSettingsPanel.SetActive(false);
         if (vrSelectionUI != null) vrSelectionUI.SetActive(true);
 
+        HideBallOutsidePlay();
         UpdateSelectionVisuals();
     }
 
@@ -532,7 +629,6 @@ public class GameManager : MonoBehaviour
     {
         int charIdx = Mathf.Clamp(selectedCharacterIndex, 0, 3);
 
-        // 캐릭터 이미지 및 프리셋 컬러/텍스트 반영
         if (characterSprites != null && characterSprites.Length > 0)
         {
             Sprite sp = characterSprites[charIdx % characterSprites.Length];
@@ -546,7 +642,6 @@ public class GameManager : MonoBehaviour
             charNameText.text = characterNames[charIdx];
         }
 
-        // 라켓 이미지 및 텍스트 반영
         if (racketSprites != null && racketSprites.Length > 0)
         {
             int rIdx = Mathf.Clamp(selectedRacketIndex, 0, racketSprites.Length - 1);
@@ -559,7 +654,6 @@ public class GameManager : MonoBehaviour
             racketNameText.text = racketNames[Mathf.Clamp(selectedRacketIndex, 0, racketNames.Length - 1)];
         }
 
-        // VR 플레이어 손에 들린 3D 라켓과 캐릭터 능력치 즉시 미리보기 적용
         if (vrPlayerRig != null)
         {
             VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
@@ -577,6 +671,8 @@ public class GameManager : MonoBehaviour
 
     public void GameStart(bool useVR)
     {
+        CancelInvoke(nameof(ResetRound));
+        isPointProcessing = false;
         isVRMode = true;
         isGameStarted = true;
         isGamePaused = false;
@@ -598,16 +694,22 @@ public class GameManager : MonoBehaviour
         if (vrPlayerRig != null)
         {
             vrPlayerRig.SetActive(true);
+            Vector3 targetPos = (playerViewPoint != null) ? playerViewPoint.position : originalRigPosition;
+            Quaternion targetRot = (playerViewPoint != null) ? playerViewPoint.rotation : originalRigRotation;
+            vrPlayerRig.transform.position = targetPos;
+            vrPlayerRig.transform.rotation = targetRot;
+
             VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
             if (vr != null)
             {
+                vr.ResetToStart();
                 vr.SelectRacket(selectedRacketIndex);
                 vr.ApplyCharacterPreset(selectedCharacterIndex);
             }
         }
 
         EnemyAI enemy = Object.FindFirstObjectByType<EnemyAI>();
-        if (enemy != null) enemy.ApplyDifficulty(aiDifficulty);
+        if (enemy != null) enemy.ApplyOpponentPreset(selectedCharacterIndex, aiDifficulty);
 
         playerPoints = 0;
         enemyPoints = 0;
@@ -624,7 +726,6 @@ public class GameManager : MonoBehaviour
         if (!isGameStarted || isGamePaused) return;
         isGamePaused = true;
 
-        // Time.timeScale을 0으로 만들지 않고 공 물리만 일시 정지하여 VR 레이캐스트 안정화 유지
         Ball b = Object.FindFirstObjectByType<Ball>();
         if (b != null)
         {
@@ -639,6 +740,12 @@ public class GameManager : MonoBehaviour
                 }
                 b.SetKinematic(true);
             }
+        }
+
+        if (vrPlayerRig != null)
+        {
+            VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
+            if (vr != null) vr.SetRacketVisible(false);
         }
 
         if (pauseMenuPanel != null)
@@ -656,6 +763,12 @@ public class GameManager : MonoBehaviour
         if (pauseMenuPanel != null) pauseMenuPanel.SetActive(false);
         if (vrSettingsPanel != null) vrSettingsPanel.SetActive(false);
         if (vrMenuCanvas != null) vrMenuCanvas.SetActive(false);
+
+        if (vrPlayerRig != null)
+        {
+            VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
+            if (vr != null) vr.SetRacketVisible(true);
+        }
 
         Ball b = Object.FindFirstObjectByType<Ball>();
         if (b != null && !savedBallWasKinematic)
@@ -690,19 +803,34 @@ public class GameManager : MonoBehaviour
     public void NotifyBallOut(GameObject trigger)
     {
         if (!isGameStarted || isGamePaused || isPointProcessing) return;
-        isPointProcessing = true;
 
         bool playerScored = false;
         if (trigger == playerBackTrigger) playerScored = false;
         else if (trigger == enemyBackTrigger) playerScored = true;
-        else { isPointProcessing = false; return; }
+        else return;
+
+        isPointProcessing = true;
+
+        Ball b = Object.FindFirstObjectByType<Ball>();
+        if (b != null)
+        {
+            b.SetKinematic(true);
+            b.ResetBounceCount();
+        }
 
         AddPoint(playerScored);
-        Invoke(nameof(ResetRound), 1.0f);
+
+        // 매치가 끝나지 않았을 때만 0.85초 후 다음 서브 라운드 시작 (이중 호출 방지)
+        if (isGameStarted)
+        {
+            CancelInvoke(nameof(ResetRound));
+            Invoke(nameof(ResetRound), 0.85f);
+        }
     }
 
     public void ResetRound()
     {
+        CancelInvoke(nameof(ResetRound));
         isPointProcessing = false;
         if (!isGameStarted) return;
 
@@ -733,50 +861,53 @@ public class GameManager : MonoBehaviour
 
     void CheckPointWin()
     {
-        if (playerPoints > 3)
+        // 정통 테니스 룰: 4점(40점 이후) 이상 득점 & 2점 차 이상 리드 시 게임(세트) 획득
+        if (playerPoints >= 4 && (playerPoints - enemyPoints) >= 2)
         {
             playerGamesWon++;
             playerPoints = 0;
             enemyPoints = 0;
-            if (playerGamesWon >= gamesToWin) ShowGameOver(true);
-            else ResetRound();
+            if (playerGamesWon >= gamesToWin)
+            {
+                ShowGameOver(true);
+            }
         }
-        else if (enemyPoints > 3)
+        else if (enemyPoints >= 4 && (enemyPoints - playerPoints) >= 2)
         {
             enemyGamesWon++;
             playerPoints = 0;
             enemyPoints = 0;
-            if (enemyGamesWon >= gamesToWin) ShowGameOver(false);
-            else ResetRound();
-        }
-        else
-        {
-            ResetRound();
+            if (enemyGamesWon >= gamesToWin)
+            {
+                ShowGameOver(false);
+            }
         }
     }
 
     void ShowGameOver(bool isVictory)
     {
+        CancelInvoke(nameof(ResetRound));
+        isPointProcessing = false;
         isGameStarted = false;
         isGamePaused = false;
 
-        Ball b = Object.FindFirstObjectByType<Ball>();
-        if (b != null) b.SetKinematic(true);
+        if (vrPlayerRig != null)
+        {
+            VRPlayerController vr = vrPlayerRig.GetComponentInChildren<VRPlayerController>();
+            if (vr != null) vr.ResetToStart();
+        }
 
-        if (isVictory)
-        {
-            if (victoryPanel != null) victoryPanel.SetActive(true);
-        }
-        else
-        {
-            if (losePanel != null) losePanel.SetActive(true);
-        }
+        HideBallOutsidePlay();
+
+        if (vrCanvas != null) vrCanvas.SetActive(true);
+        if (victoryPanel != null) victoryPanel.SetActive(isVictory);
+        if (losePanel != null) losePanel.SetActive(!isVictory);
     }
 
     void UpdateScoreUI()
     {
-        string pScore = GetTennisScore(playerPoints);
-        string eScore = GetTennisScore(enemyPoints);
+        string pScore = GetTennisScore(playerPoints, enemyPoints);
+        string eScore = GetTennisScore(enemyPoints, playerPoints);
 
         if (vrScoreText != null)
         {
@@ -795,9 +926,14 @@ public class GameManager : MonoBehaviour
         if (vrGameScoreText != null) vrGameScoreText.text = gameScoreStr;
     }
 
-    string GetTennisScore(int points)
+    string GetTennisScore(int myPoints, int oppPoints)
     {
-        if (points >= 0 && points <= 3) return tennisScores[points];
-        return "40";
+        if (myPoints >= 3 && oppPoints >= 3)
+        {
+            if (myPoints == oppPoints) return "DEUCE";
+            return (myPoints > oppPoints) ? "ADV" : "40";
+        }
+        int clamped = Mathf.Clamp(myPoints, 0, 3);
+        return tennisScores[clamped];
     }
 }
